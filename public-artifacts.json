@@ -7,6 +7,8 @@
     {"artifactId": "object-ingest-connector", "packaging": "jar"},
     {"artifactId": "query-jpa-connector", "packaging": "jar"},
     {"artifactId": "query-hibernate-common", "packaging": "jar"},
+    {"artifactId": "graphql-connector", "packaging": "jar"},
+    {"artifactId": "graphql-smallrye-connector", "packaging": "jar"},
     {"artifactId": "connector-import-tooling", "packaging": "jar"},
     {"artifactId": "connector-maven-plugin", "packaging": "maven-plugin"},
     {"artifactId": "connector-mcp-maven-plugin", "packaging": "maven-plugin"},
@@ -15,7 +17,7 @@
   ],
   "internalArtifacts": [
     "embedding-query-connector", "embedding-query-langchain4j-connector", "framework-connectors", "gmail-query-connector",
-    "graphql-connector", "graphql-smallrye-connector", "host-gmail", "host-microsoft-graph", "host-oidc-quarkus",
+    "host-gmail", "host-microsoft-graph", "host-oidc-quarkus",
     "host-quickbooks-mcp", "http-connector", "llm-query-connector", "llm-query-langchain4j-connector", "mcp-connector",
     "query-hibernate-reactive-connector", "representation-provider-file", "representation-provider-fixture",
     "representation-provider-http", "vector-store-connector", "vector-store-pgvector-connector"
