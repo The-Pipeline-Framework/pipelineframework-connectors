@@ -6,14 +6,18 @@
     {"artifactId": "representation-provider-opencsv", "packaging": "jar"},
     {"artifactId": "object-ingest-connector", "packaging": "jar"},
     {"artifactId": "query-jpa-connector", "packaging": "jar"},
-    {"artifactId": "query-hibernate-common", "packaging": "jar"}
+    {"artifactId": "query-hibernate-common", "packaging": "jar"},
+    {"artifactId": "connector-import-tooling", "packaging": "jar"},
+    {"artifactId": "connector-maven-plugin", "packaging": "maven-plugin"},
+    {"artifactId": "connector-mcp-maven-plugin", "packaging": "maven-plugin"},
+    {"artifactId": "connector-openapi-maven-plugin", "packaging": "maven-plugin"},
+    {"artifactId": "mcp-contract", "packaging": "jar"}
   ],
   "internalArtifacts": [
-    "connector-import-tooling", "connector-maven-plugin", "connector-mcp-maven-plugin", "connector-openapi-maven-plugin",
     "embedding-query-connector", "embedding-query-langchain4j-connector", "framework-connectors", "gmail-query-connector",
     "graphql-connector", "graphql-smallrye-connector", "host-gmail", "host-microsoft-graph", "host-oidc-quarkus",
     "host-quickbooks-mcp", "http-connector", "llm-query-connector", "llm-query-langchain4j-connector", "mcp-connector",
-    "mcp-contract", "query-hibernate-reactive-connector", "representation-provider-file", "representation-provider-fixture",
+    "query-hibernate-reactive-connector", "representation-provider-file", "representation-provider-fixture",
     "representation-provider-http", "vector-store-connector", "vector-store-pgvector-connector"
   ],
   "externalArtifacts": [
