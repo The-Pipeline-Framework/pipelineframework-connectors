@@ -3,11 +3,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const publishedArtifacts = [
-  { artifactId: 'http-contract', mirrorPath: 'framework/connectors/http-contract/pom.xml' },
-  { artifactId: 'representation-provider-opencsv', mirrorPath: 'framework/representation-provider-opencsv/pom.xml' },
-  { artifactId: 'object-ingest-connector', mirrorPath: 'framework/connectors/object-ingest/pom.xml' },
-  { artifactId: 'query-jpa-connector', mirrorPath: 'framework/connectors/query-jpa/pom.xml' },
-  { artifactId: 'query-hibernate-common', mirrorPath: 'framework/connectors/query-hibernate-common/pom.xml' },
+  { artifactId: 'http-contract', mirrorPath: 'framework/connectors/http-contract/pom.xml', reactorModule: 'connectors' },
+  { artifactId: 'representation-provider-opencsv', mirrorPath: 'framework/representation-provider-opencsv/pom.xml', reactorModule: 'representation-provider-opencsv' },
+  { artifactId: 'object-ingest-connector', mirrorPath: 'framework/connectors/object-ingest/pom.xml', reactorModule: 'connectors' },
+  { artifactId: 'query-jpa-connector', mirrorPath: 'framework/connectors/query-jpa/pom.xml', reactorModule: 'connectors' },
+  { artifactId: 'query-hibernate-common', mirrorPath: 'framework/connectors/query-hibernate-common/pom.xml', reactorModule: 'connectors' },
 ];
 
 function externalArtifact(manifest, artifactId) {
@@ -28,23 +28,37 @@ function centralExcludes(frameworkPom, artifactId) {
 }
 
 function isNonDeployable(mirrorPom) {
-  const properties = mirrorPom.match(/<properties>([\s\S]*?)<\/properties>/)?.[1] ?? '';
+  const activeProject = mirrorPom
+    .replace(/<profiles>[\s\S]*?<\/profiles>/g, '')
+    .replace(/<pluginManagement>[\s\S]*?<\/pluginManagement>/g, '');
+  const properties = activeProject.match(/<properties>([\s\S]*?)<\/properties>/)?.[1] ?? '';
   if (/<maven\.deploy\.skip>\s*true\s*<\/maven\.deploy\.skip>/.test(properties)) return true;
-  const deployPlugin = [...mirrorPom.matchAll(/<plugin>([\s\S]*?)<\/plugin>/g)]
+  const build = activeProject.match(/<build>([\s\S]*?)<\/build>/)?.[1] ?? '';
+  const plugins = build.match(/<plugins>([\s\S]*?)<\/plugins>/)?.[1] ?? '';
+  const deployPlugin = [...plugins.matchAll(/<plugin>([\s\S]*?)<\/plugin>/g)]
     .map((match) => match[1]).find((plugin) => /<artifactId>\s*maven-deploy-plugin\s*<\/artifactId>/.test(plugin));
   return /<skip>\s*true\s*<\/skip>/.test(deployPlugin ?? '');
+}
+
+function includesReactorModule(frameworkPom, modulePath) {
+  const escaped = modulePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`<module>\\s*${escaped}\\s*</module>`).test(frameworkPom);
 }
 
 export function assertMonorepoPublishersStopped(manifest, mirrors, frameworkPom, artifacts = publishedArtifacts) {
   if (!Array.isArray(manifest?.publicArtifacts) || !Array.isArray(manifest?.externalArtifacts)) {
     throw new Error('Monorepo publication manifest is missing public or external artifacts');
   }
-  for (const { artifactId } of artifacts) {
+  for (const { artifactId, reactorModule } of artifacts) {
     if (manifest.publicArtifacts.some((entry) => entry?.artifactId === artifactId)) throw new Error(`Monorepo still declares ${artifactId} as public`);
     const external = externalArtifact(manifest, artifactId);
     if (external?.ownership !== 'external') throw new Error(`Monorepo does not declare ${artifactId} as externally owned`);
     const mirrorPom = mirrors?.[artifactId];
-    if (mirrorPom === undefined) continue;
+    if (mirrorPom === undefined) {
+      if (external.reactorSourceMirror === true) throw new Error(`Monorepo ${artifactId} source mirror is declared but its POM is missing`);
+      if (includesReactorModule(frameworkPom, reactorModule)) throw new Error(`Monorepo ${artifactId} POM is missing while reactor module ${reactorModule} remains active`);
+      continue;
+    }
     if (external.reactorSourceMirror !== true) throw new Error(`Monorepo ${artifactId} source mirror is not marked reactorSourceMirror`);
     if (!isNonDeployable(mirrorPom)) throw new Error(`Monorepo ${artifactId} source mirror remains deployable`);
     if (!centralExcludes(frameworkPom, artifactId)) throw new Error(`Monorepo Central bundle does not exclude ${artifactId}`);
