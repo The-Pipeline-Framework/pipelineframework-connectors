@@ -13,7 +13,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
-final class JpaQueryPlan {
+public final class JpaQueryPlan {
     private static final Pattern JAVA_IDENTIFIER = Pattern.compile("[A-Za-z_$][A-Za-z\\d_$]*");
     private static final String INPUT_PREFIX = "input.";
     private static final Set<String> ORDER_DIRECTIONS = Set.of("asc", "desc");
@@ -41,7 +41,7 @@ final class JpaQueryPlan {
         this.limit = limit;
     }
 
-    static JpaQueryPlan from(String queryId, JpaFindOneConfiguration configuration) {
+    public static JpaQueryPlan from(String queryId, JpaFindOneConfiguration configuration) {
         return fromOne(
             queryId,
             configuration.entity(),
@@ -52,7 +52,7 @@ final class JpaQueryPlan {
             configuration.result().orElse("single"));
     }
 
-    static JpaQueryPlan fromMany(String queryId, JpaFindManyConfiguration configuration) {
+    public static JpaQueryPlan fromMany(String queryId, JpaFindManyConfiguration configuration) {
         String entity = configuration.entity();
         Map<String, JpaPredicate> where = configuration.where();
         Map<String, String> projection = configuration.projection().orElse(Map.of());
@@ -122,19 +122,19 @@ final class JpaQueryPlan {
         }
     }
 
-    String queryId() {
+    public String queryId() {
         return queryId;
     }
 
-    Class<?> entityType() {
+    public Class<?> entityType() {
         return entityType;
     }
 
-    Map<String, String> projection() {
+    public Map<String, String> projection() {
         return projection;
     }
 
-    String toHql() {
+    public String toHql() {
         StringBuilder hql = new StringBuilder("select e from ")
             .append(entityType.getName())
             .append(" e where ");
@@ -161,7 +161,7 @@ final class JpaQueryPlan {
         return hql.toString();
     }
 
-    Map<String, Object> bindings(Object input) {
+    public Map<String, Object> bindings(Object input) {
         Map<String, Object> bindings = new LinkedHashMap<>();
         ParameterCounter parameters = new ParameterCounter();
         for (JpaPredicate predicate : where.values()) {
@@ -170,19 +170,19 @@ final class JpaQueryPlan {
         return Collections.unmodifiableMap(new LinkedHashMap<>(bindings));
     }
 
-    int maxResults() {
+    public int maxResults() {
         return limit.filter(value -> value == 1).isPresent() ? 1 : 2;
     }
 
-    boolean firstResultOnly() {
+    public boolean firstResultOnly() {
         return limit.filter(value -> value == 1).isPresent();
     }
 
-    Optional<Integer> streamingLimit() {
+    public Optional<Integer> streamingLimit() {
         return limit;
     }
 
-    OrderingGuard orderingGuard() {
+    public OrderingGuard orderingGuard() {
         return new OrderingGuard(List.copyOf(orderBy.keySet()));
     }
 
@@ -323,7 +323,7 @@ final class JpaQueryPlan {
         }
     }
 
-    static final class OrderingGuard {
+    public static final class OrderingGuard {
         private static final Object NULL_ORDER_VALUE = new Object();
         private final List<String> paths;
         private List<Object> previous;
@@ -332,7 +332,7 @@ final class JpaQueryPlan {
             this.paths = paths;
         }
 
-        void validateNext(Object entity) {
+        public void validateNext(Object entity) {
             List<Object> current = paths.stream()
                 .map(path -> JpaQueryReflection.readProperty(entity, path).orElse(NULL_ORDER_VALUE))
                 .toList();

@@ -5,11 +5,11 @@ import java.lang.reflect.RecordComponent;
 import java.util.Map;
 import java.util.Optional;
 
-final class JpaQueryProjection {
+public final class JpaQueryProjection {
     private JpaQueryProjection() {
     }
 
-    static <O> O project(Object entity, Class<O> outputType, Map<String, String> projection) {
+    public static <O> O project(Object entity, Class<O> outputType, Map<String, String> projection) {
         if (entity == null) {
             throw new IllegalArgumentException("query entity row must not be null");
         }
