@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ~ Copyright (c) 2023-2025 Mariano Barcia
+  ~
+  ~ Licensed under the Apache License, Version 2.0 (the "License");
+  ~ you may not use this file except in compliance with the License.
+  ~ You may obtain a copy of the License at
+  ~
+  ~     http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing, software
+  ~ distributed under the License is distributed on an "AS IS" BASIS,
+  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  ~ See the License for the specific language governing permissions and
+  ~ limitations under the License.
+  -->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>org.pipelineframework</groupId>
+    <artifactId>pipelineframework-connectors-parent</artifactId>
+    <version>26.9.4-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>The Pipeline Framework Connectors</name>
+    <description>Standalone TPF connectors, representation providers, import tooling, and host integrations</description>
+    <url>https://pipelineframework.org/</url>
+    <licenses><license><name>Apache License, Version 2.0</name><url>https://www.apache.org/licenses/LICENSE-2.0</url><distribution>repo</distribution></license></licenses>
+    <developers><developer><id>mbarcia</id><name>Mariano E. Barcia</name><url>https://github.com/mbarcia</url></developer></developers>
+    <scm>
+        <connection>scm:git:git@github.com:The-Pipeline-Framework/pipelineframework-connectors.git</connection>
+        <developerConnection>scm:git:git@github.com:The-Pipeline-Framework/pipelineframework-connectors.git</developerConnection>
+        <url>https://github.com/The-Pipeline-Framework/pipelineframework-connectors</url><tag>HEAD</tag>
+    </scm>
+
+    <properties>
+        <pipelineframework.contracts.version>26.9.4-SNAPSHOT</pipelineframework.contracts.version>
+        <pipelineframework.compiler.version>26.9.4-SNAPSHOT</pipelineframework.compiler.version>
+        <pipelineframework.runtime.version>26.9.4-SNAPSHOT</pipelineframework.runtime.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>21</maven.compiler.source><maven.compiler.target>21</maven.compiler.target>
+        <mapstruct.version>1.6.3</mapstruct.version><enablePreview>true</enablePreview>
+        <quarkus.platform.version>3.39.2</quarkus.platform.version>
+        <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id><quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
+        <version.jandex>3.5.0</version.jandex><spotless.plugin.version>2.44.0</spotless.plugin.version>
+        <langchain4j.version>1.19.0</langchain4j.version><quarkus-langchain4j.version>1.13.1</quarkus-langchain4j.version>
+        <google.gmail.api.version>v1-rev20260727-2.0.0</google.gmail.api.version><mcp.java.sdk.version>2.0.1</mcp.java.sdk.version>
+        <swagger.parser.version>2.1.48</swagger.parser.version><re2j.version>1.8</re2j.version><jakarta.cdi.version>4.0.1</jakarta.cdi.version>
+        <mockito.version>5.21.0</mockito.version>
+        <maven.deploy.skip>true</maven.deploy.skip><tpf.flatten.skip>true</tpf.flatten.skip><skipUnitTests>false</skipUnitTests>
+        <argLine /><surefireArgLine />
+    </properties>
+
+    <repositories><repository><id>central-snapshots</id><url>https://central.sonatype.com/repository/maven-snapshots/</url><releases><enabled>false</enabled></releases><snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots></repository></repositories>
+
+    <modules>
+        <module>framework/connector-maven-plugin</module><module>framework/connector-import-tooling</module>
+        <module>framework/connector-mcp-maven-plugin</module><module>framework/connector-openapi-maven-plugin</module>
+        <module>framework/representation-provider-fixture</module><module>framework/representation-provider-opencsv</module>
+        <module>framework/representation-provider-file</module><module>framework/representation-provider-http</module>
+        <module>framework/connectors</module><module>framework/host-oidc-quarkus</module>
+        <module>framework/host-gmail</module><module>framework/host-microsoft-graph</module><module>framework/host-quickbooks-mcp</module>
+    </modules>
+
+    <dependencyManagement><dependencies>
+        <dependency><groupId>${quarkus.platform.group-id}</groupId><artifactId>${quarkus.platform.artifact-id}</artifactId><version>${quarkus.platform.version}</version><type>pom</type><scope>import</scope></dependency>
+        <dependency><groupId>io.quarkus.platform</groupId><artifactId>quarkus-amazon-services-bom</artifactId><version>${quarkus.platform.version}</version><type>pom</type><scope>import</scope></dependency>
+        <dependency><groupId>io.modelcontextprotocol.sdk</groupId><artifactId>mcp-core</artifactId><version>${mcp.java.sdk.version}</version></dependency>
+        <dependency><groupId>io.modelcontextprotocol.sdk</groupId><artifactId>mcp-json-jackson2</artifactId><version>${mcp.java.sdk.version}</version></dependency>
+        <dependency><groupId>com.google.apis</groupId><artifactId>google-api-services-gmail</artifactId><version>${google.gmail.api.version}</version></dependency>
+        <dependency><groupId>com.google.re2j</groupId><artifactId>re2j</artifactId><version>${re2j.version}</version></dependency>
+    </dependencies></dependencyManagement>
+
+    <build>
+        <pluginManagement><plugins>
+            <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.14.0</version><configuration><source>21</source><target>21</target><release>21</release><enablePreview>true</enablePreview><annotationProcessorPaths><path><groupId>org.projectlombok</groupId><artifactId>lombok</artifactId><version>1.18.36</version></path><path><groupId>org.mapstruct</groupId><artifactId>mapstruct-processor</artifactId><version>${mapstruct.version}</version></path><path><groupId>io.quarkus</groupId><artifactId>quarkus-extension-processor</artifactId><version>${quarkus.platform.version}</version></path></annotationProcessorPaths></configuration></plugin>
+            <plugin><groupId>io.quarkus</groupId><artifactId>quarkus-maven-plugin</artifactId><version>${quarkus.platform.version}</version><extensions>true</extensions><configuration><jvmArgs>--enable-preview</jvmArgs></configuration></plugin>
+            <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-jar-plugin</artifactId><version>3.4.2</version></plugin>
+            <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-deploy-plugin</artifactId><version>3.1.4</version><configuration><skip>true</skip></configuration></plugin>
+            <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.1</version><dependencies><dependency><groupId>org.ow2.asm</groupId><artifactId>asm</artifactId><version>9.5</version></dependency><dependency><groupId>org.mockito</groupId><artifactId>mockito-core</artifactId><version>${mockito.version}</version></dependency></dependencies><configuration><useSystemClassLoader>true</useSystemClassLoader><skip>${skipUnitTests}</skip><skipTests>${skipTests}</skipTests><forkCount>1</forkCount><reuseForks>true</reuseForks><systemPropertyVariables><java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager></systemPropertyVariables><argLine>@{argLine} ${surefireArgLine} -javaagent:${settings.localRepository}/org/mockito/mockito-core/${mockito.version}/mockito-core-${mockito.version}.jar --enable-preview -XX:+EnableDynamicAgentLoading</argLine></configuration></plugin>
+            <plugin><groupId>com.diffplug.spotless</groupId><artifactId>spotless-maven-plugin</artifactId><version>${spotless.plugin.version}</version><configuration><java><removeUnusedImports /><formatAnnotations /><endWithNewline /></java><formats><format><includes><include>src/main/**/*.java</include><include>src/test/**/*.java</include></includes></format></formats></configuration><executions><execution><id>spotless-check</id><phase>package</phase><goals><goal>check</goal></goals></execution></executions></plugin>
+            <plugin><groupId>io.smallrye</groupId><artifactId>jandex-maven-plugin</artifactId><version>${version.jandex}</version><executions><execution><id>make-index</id><goals><goal>jandex</goal></goals></execution></executions></plugin>
+            <plugin><groupId>io.quarkus</groupId><artifactId>quarkus-extension-maven-plugin</artifactId><version>${quarkus.platform.version}</version></plugin>
+        </plugins></pluginManagement>
+        <plugins>
+            <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId></plugin>
+            <plugin><groupId>com.diffplug.spotless</groupId><artifactId>spotless-maven-plugin</artifactId></plugin>
+            <plugin><groupId>org.codehaus.mojo</groupId><artifactId>flatten-maven-plugin</artifactId><version>1.7.3</version><configuration><skip>${tpf.flatten.skip}</skip><updatePomFile>true</updatePomFile><flattenMode>oss</flattenMode></configuration><executions><execution><id>flatten</id><phase>process-resources</phase><goals><goal>flatten</goal></goals></execution><execution><id>flatten-clean</id><phase>clean</phase><goals><goal>clean</goal></goals></execution></executions></plugin>
+            <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-deploy-plugin</artifactId><configuration><skip>true</skip></configuration></plugin>
+        </plugins>
+    </build>
+</project>

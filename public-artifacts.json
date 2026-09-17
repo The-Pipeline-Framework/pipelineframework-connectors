@@ -1,0 +1,31 @@
+{
+  "groupId": "org.pipelineframework",
+  "publicArtifacts": [
+    {"artifactId": "pipelineframework-connectors-parent", "packaging": "pom"},
+    {"artifactId": "http-contract", "packaging": "jar"},
+    {"artifactId": "representation-provider-opencsv", "packaging": "jar"},
+    {"artifactId": "object-ingest-connector", "packaging": "jar"},
+    {"artifactId": "query-jpa-connector", "packaging": "jar"},
+    {"artifactId": "query-hibernate-common", "packaging": "jar"}
+  ],
+  "internalArtifacts": [
+    "connector-import-tooling", "connector-maven-plugin", "connector-mcp-maven-plugin", "connector-openapi-maven-plugin",
+    "embedding-query-connector", "embedding-query-langchain4j-connector", "framework-connectors", "gmail-query-connector",
+    "graphql-connector", "graphql-smallrye-connector", "host-gmail", "host-microsoft-graph", "host-oidc-quarkus",
+    "host-quickbooks-mcp", "http-connector", "llm-query-connector", "llm-query-langchain4j-connector", "mcp-connector",
+    "mcp-contract", "query-hibernate-reactive-connector", "representation-provider-file", "representation-provider-fixture",
+    "representation-provider-http", "vector-store-connector", "vector-store-pgvector-connector"
+  ],
+  "externalArtifacts": [
+    {"artifactId": "pipelineframework", "packaging": "jar", "ownership": "external", "note": "Published from the standalone pipelineframework-runtime repository"},
+    {"artifactId": "pipelineframework-compiler", "packaging": "jar", "ownership": "external", "note": "Published from the standalone pipelineframework-compiler repository"},
+    {"artifactId": "pipelineframework-runtime-core", "packaging": "jar", "ownership": "external", "note": "Published from the standalone contracts repository"},
+    {"artifactId": "pipelineframework-runtime-api", "packaging": "jar", "ownership": "external", "note": "Published from the standalone contracts repository"},
+    {"artifactId": "pipelineframework-semantic-model", "packaging": "jar", "ownership": "external", "note": "Published from the standalone contracts repository"},
+    {"artifactId": "representation-provider-api", "packaging": "jar", "ownership": "external", "note": "Published from the standalone contracts repository"}
+  ],
+  "invariants": {
+    "description": "Staging publication classification for the standalone connectors reactor.",
+    "source": "framework/public-artifacts.json from the extraction source worktree"
+  }
+}

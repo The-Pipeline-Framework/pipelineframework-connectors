@@ -1,0 +1,7 @@
+.m2/
+target/
+**/target/
+.flattened-pom.xml
+**/.flattened-pom.xml
+.idea/
+.DS_Store
