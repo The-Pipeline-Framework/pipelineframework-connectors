@@ -3,11 +3,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const publishedArtifacts = [
-  { artifactId: 'http-contract', mirrorPath: 'framework/connectors/http-contract/pom.xml', reactorModule: 'connectors' },
-  { artifactId: 'representation-provider-opencsv', mirrorPath: 'framework/representation-provider-opencsv/pom.xml', reactorModule: 'representation-provider-opencsv' },
-  { artifactId: 'object-ingest-connector', mirrorPath: 'framework/connectors/object-ingest/pom.xml', reactorModule: 'connectors' },
-  { artifactId: 'query-jpa-connector', mirrorPath: 'framework/connectors/query-jpa/pom.xml', reactorModule: 'connectors' },
-  { artifactId: 'query-hibernate-common', mirrorPath: 'framework/connectors/query-hibernate-common/pom.xml', reactorModule: 'connectors' },
+  { artifactId: 'http-contract', mirrorPath: 'framework/connectors/http-contract/pom.xml', reactorParent: 'connectors', reactorModule: 'http-contract' },
+  { artifactId: 'representation-provider-opencsv', mirrorPath: 'framework/representation-provider-opencsv/pom.xml', reactorParent: 'framework', reactorModule: 'representation-provider-opencsv' },
+  { artifactId: 'object-ingest-connector', mirrorPath: 'framework/connectors/object-ingest/pom.xml', reactorParent: 'connectors', reactorModule: 'object-ingest' },
+  { artifactId: 'query-jpa-connector', mirrorPath: 'framework/connectors/query-jpa/pom.xml', reactorParent: 'connectors', reactorModule: 'query-jpa' },
+  { artifactId: 'query-hibernate-common', mirrorPath: 'framework/connectors/query-hibernate-common/pom.xml', reactorParent: 'connectors', reactorModule: 'query-hibernate-common' },
+  { artifactId: 'connector-import-tooling', mirrorPath: 'framework/connector-import-tooling/pom.xml', reactorParent: 'framework', reactorModule: 'connector-import-tooling' },
+  { artifactId: 'connector-maven-plugin', mirrorPath: 'framework/connector-maven-plugin/pom.xml', reactorParent: 'framework', reactorModule: 'connector-maven-plugin' },
+  { artifactId: 'connector-mcp-maven-plugin', mirrorPath: 'framework/connector-mcp-maven-plugin/pom.xml', reactorParent: 'framework', reactorModule: 'connector-mcp-maven-plugin' },
+  { artifactId: 'connector-openapi-maven-plugin', mirrorPath: 'framework/connector-openapi-maven-plugin/pom.xml', reactorParent: 'framework', reactorModule: 'connector-openapi-maven-plugin' },
+  { artifactId: 'mcp-contract', mirrorPath: 'framework/connectors/mcp-contract/pom.xml', reactorParent: 'connectors', reactorModule: 'mcp-contract' },
 ];
 
 function externalArtifact(manifest, artifactId) {
@@ -45,22 +50,26 @@ function includesReactorModule(frameworkPom, modulePath) {
   return new RegExp(`<module>\\s*${escaped}\\s*</module>`).test(frameworkPom);
 }
 
-export function assertMonorepoPublishersStopped(manifest, mirrors, frameworkPom, artifacts = publishedArtifacts) {
-  if (!Array.isArray(manifest?.publicArtifacts) || !Array.isArray(manifest?.externalArtifacts)) {
-    throw new Error('Monorepo publication manifest is missing public or external artifacts');
+export function assertMonorepoPublishersStopped(manifest, mirrors, frameworkPom, connectorsPom = '', artifacts = publishedArtifacts) {
+  if (!Array.isArray(manifest?.publicArtifacts) || !Array.isArray(manifest?.internalArtifacts) || !Array.isArray(manifest?.externalArtifacts)) {
+    throw new Error('Monorepo publication manifest is missing public, internal, or external artifacts');
   }
-  for (const { artifactId, reactorModule } of artifacts) {
+  for (const { artifactId, reactorParent, reactorModule } of artifacts) {
     if (manifest.publicArtifacts.some((entry) => entry?.artifactId === artifactId)) throw new Error(`Monorepo still declares ${artifactId} as public`);
     const external = externalArtifact(manifest, artifactId);
-    if (external?.ownership !== 'external') throw new Error(`Monorepo does not declare ${artifactId} as externally owned`);
+    const internal = manifest.internalArtifacts.includes(artifactId);
+    if (external?.ownership !== 'external' && !internal) throw new Error(`Monorepo does not classify ${artifactId} as internal or externally owned`);
     const mirrorPom = mirrors?.[artifactId];
     if (mirrorPom === undefined) {
+      if (internal) throw new Error(`Monorepo still declares ${artifactId} internal but its POM is missing`);
       if (external.reactorSourceMirror === true) throw new Error(`Monorepo ${artifactId} source mirror is declared but its POM is missing`);
-      if (includesReactorModule(frameworkPom, reactorModule)) throw new Error(`Monorepo ${artifactId} POM is missing while reactor module ${reactorModule} remains active`);
+      const reactorPom = reactorParent === 'connectors' ? connectorsPom : frameworkPom;
+      if (includesReactorModule(reactorPom, reactorModule)) throw new Error(`Monorepo ${artifactId} POM is missing while reactor module ${reactorModule} remains active`);
       continue;
     }
-    if (external.reactorSourceMirror !== true) throw new Error(`Monorepo ${artifactId} source mirror is not marked reactorSourceMirror`);
-    if (!isNonDeployable(mirrorPom)) throw new Error(`Monorepo ${artifactId} source mirror remains deployable`);
+    if (external && external.reactorSourceMirror !== true) throw new Error(`Monorepo ${artifactId} source mirror is not marked reactorSourceMirror`);
+    const inheritedNonDeployable = reactorParent === 'connectors' && isNonDeployable(connectorsPom);
+    if (!isNonDeployable(mirrorPom) && !inheritedNonDeployable) throw new Error(`Monorepo ${artifactId} source mirror remains deployable`);
     if (!centralExcludes(frameworkPom, artifactId)) throw new Error(`Monorepo Central bundle does not exclude ${artifactId}`);
   }
 }
@@ -85,12 +94,12 @@ async function main() {
   if (!refResponse.ok) throw new Error(`GitHub publication preflight failed: HTTP ${refResponse.status} for main`);
   const commitSha = (await refResponse.json()).object?.sha;
   if (typeof commitSha !== 'string' || !/^[0-9a-f]{40}$/.test(commitSha)) throw new Error('No monorepo main commit returned');
-  const [manifestJson, frameworkPom, ...mirrorPoms] = await Promise.all([
-    githubFile('framework/public-artifacts.json', commitSha), githubFile('framework/pom.xml', commitSha),
+  const [manifestJson, frameworkPom, connectorsPom, ...mirrorPoms] = await Promise.all([
+    githubFile('framework/public-artifacts.json', commitSha), githubFile('framework/pom.xml', commitSha), githubFile('framework/connectors/pom.xml', commitSha),
     ...publishedArtifacts.map(({ mirrorPath }) => githubFile(mirrorPath, commitSha, true)),
   ]);
   const mirrors = Object.fromEntries(publishedArtifacts.map(({ artifactId }, index) => [artifactId, mirrorPoms[index]]));
-  assertMonorepoPublishersStopped(JSON.parse(manifestJson), mirrors, frameworkPom);
+  assertMonorepoPublishersStopped(JSON.parse(manifestJson), mirrors, frameworkPom, connectorsPom);
   console.log(`Monorepo ${commitSha} no longer publishes staged connector artifacts; connectors is the sole publisher`);
 }
 
