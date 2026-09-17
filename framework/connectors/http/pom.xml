@@ -3,6 +3,7 @@
     <modelVersion>4.0.0</modelVersion>
     <parent><groupId>org.pipelineframework</groupId><artifactId>framework-connectors</artifactId><version>26.9.4-SNAPSHOT</version><relativePath>../pom.xml</relativePath></parent>
     <artifactId>http-connector</artifactId>
+    <properties><maven.deploy.skip>false</maven.deploy.skip></properties>
     <name>The Pipeline Framework - Pinned HTTP Connector</name>
     <description>Executes immutable imported HTTP operations as ordinary TPF Query and Command capabilities.</description>
     <dependencies>
