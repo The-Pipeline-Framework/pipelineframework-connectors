@@ -8,6 +8,7 @@
         <relativePath>../../pom.xml</relativePath>
     </parent>
     <artifactId>representation-provider-fixture</artifactId>
+    <properties><maven.deploy.skip>true</maven.deploy.skip></properties>
     <name>TPF External Representation Provider Fixture</name>
     <dependencies>
         <dependency>

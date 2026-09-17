@@ -1,0 +1,50 @@
+name: Publish Maven Central Snapshot
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: connectors-central-snapshot-publishing
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+      - name: Require snapshot version
+        run: |
+          VERSION="$(./mvnw -q help:evaluate -Dexpression=project.version -DforceStdout -Dmaven.repo.local="$GITHUB_WORKSPACE/.m2/repository")"
+          case "$VERSION" in *-SNAPSHOT) ;; *) echo "Expected a snapshot, got $VERSION"; exit 1;; esac
+      - name: Test publication handoff gate
+        run: node --test scripts/require-monorepo-connector-publishers-stop.test.mjs
+      - name: Verify monorepo publisher handoff
+        run: node scripts/require-monorepo-connector-publishers-stop.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Verify effective publication flags
+        run: |
+          ./mvnw -Pcentral-publishing -q -DskipTests help:effective-pom -Doutput=target/connectors-effective-pom.xml -Dmaven.repo.local="$GITHUB_WORKSPACE/.m2/repository"
+          node scripts/verify-connector-publication.mjs target/connectors-effective-pom.xml
+      - name: Verify and publish
+        run: ./mvnw -Pcentral-publishing -B clean deploy -U --no-transfer-progress -Dgpg.skip=false -Dmaven.repo.local="$GITHUB_WORKSPACE/.m2/repository"
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
