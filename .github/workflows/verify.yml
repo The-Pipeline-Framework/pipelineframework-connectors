@@ -24,3 +24,8 @@ jobs:
           cache: maven
       - name: Verify
         run: ./mvnw -B -V -Dmaven.repo.local="$PWD/.m2/repository" clean verify -DskipTests -Dgpg.skip
+      - name: Verify publication contract
+        run: |
+          node --test scripts/verify-connector-publication.test.mjs
+          ./mvnw -Pcentral-publishing -q -DskipTests help:effective-pom -Doutput=target/connectors-effective-pom.xml -Dmaven.repo.local="$PWD/.m2/repository"
+          node scripts/verify-connector-publication.mjs target/connectors-effective-pom.xml

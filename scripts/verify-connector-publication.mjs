@@ -3,23 +3,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const expectedDeployability = new Map([
-  ['pipelineframework-connectors-parent', true],
-  ['http-contract', true],
-  ['representation-provider-opencsv', true],
-  ['object-ingest-connector', true],
-  ['query-jpa-connector', true],
-  ['query-hibernate-common', true],
-  ['connector-import-tooling', false], ['connector-maven-plugin', false], ['connector-mcp-maven-plugin', false],
-  ['connector-openapi-maven-plugin', false], ['embedding-query-connector', false],
-  ['embedding-query-langchain4j-connector', false], ['framework-connectors', false], ['gmail-query-connector', false],
-  ['graphql-connector', false], ['graphql-smallrye-connector', false], ['host-gmail', false],
-  ['host-microsoft-graph', false], ['host-oidc-quarkus', false], ['host-quickbooks-mcp', false],
-  ['http-connector', false], ['llm-query-connector', false], ['llm-query-langchain4j-connector', false],
-  ['mcp-connector', false], ['mcp-contract', false], ['query-hibernate-reactive-connector', false],
-  ['representation-provider-file', false], ['representation-provider-fixture', false],
-  ['representation-provider-http', false], ['vector-store-connector', false], ['vector-store-pgvector-connector', false],
-]);
+export function expectedDeployabilityFromManifest(manifest) {
+  const expected = new Map();
+  for (const artifact of manifest.publicArtifacts ?? []) {
+    if (expected.has(artifact.artifactId)) throw new Error(`duplicate publication classification: ${artifact.artifactId}`);
+    expected.set(artifact.artifactId, true);
+  }
+  for (const artifactId of manifest.internalArtifacts ?? []) {
+    if (expected.has(artifactId)) throw new Error(`duplicate publication classification: ${artifactId}`);
+    expected.set(artifactId, false);
+  }
+  return expected;
+}
+
+const manifestPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'public-artifacts.json');
+export const expectedDeployability = expectedDeployabilityFromManifest(
+  JSON.parse(fs.readFileSync(manifestPath, 'utf8')),
+);
 
 function elementValue(xml, element) {
   return xml.match(new RegExp(`<${element}>([^<]+)</${element}>`))?.[1]?.trim() ?? '';
