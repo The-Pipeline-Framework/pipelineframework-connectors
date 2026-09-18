@@ -78,7 +78,7 @@ public final class LangChain4jOllamaQueryConnector extends LlmQueryConnectorProv
     }
 
     @Override
-    protected LlmDecisionClientResolver createClientResolver(
+    public LlmDecisionClientResolver createClientResolver(
         LlmProviderConfiguration configuration,
         ConnectorRuntimeContext context
     ) {
