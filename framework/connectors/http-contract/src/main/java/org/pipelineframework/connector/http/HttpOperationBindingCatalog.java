@@ -7,7 +7,9 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -51,17 +53,24 @@ public final class HttpOperationBindingCatalog {
             List<URL> ordered = new ArrayList<>();
             while (resources.hasMoreElements()) ordered.add(resources.nextElement());
             ordered.sort(Comparator.comparing(URL::toExternalForm));
-            List<HttpOperationRepresentationBinding> values = new ArrayList<>();
+            Map<String, HttpOperationRepresentationBinding> values = new LinkedHashMap<>();
             for (URL resource : ordered) {
                 try (var stream = resource.openStream()) {
                     byte[] bytes = stream.readNBytes(HttpPinnedJson.MAX_RESOURCE_BYTES + 1);
                     if (bytes.length > HttpPinnedJson.MAX_RESOURCE_BYTES) {
                         throw new IllegalArgumentException("HTTP operation binding resource exceeds size limit");
                     }
-                    values.addAll(read(new String(bytes, StandardCharsets.UTF_8)).bindings());
+                    for (HttpOperationRepresentationBinding binding :
+                            read(new String(bytes, StandardCharsets.UTF_8)).bindings()) {
+                        HttpOperationRepresentationBinding previous = values.putIfAbsent(binding.mappingKey(), binding);
+                        if (previous != null && !previous.equals(binding)) {
+                            throw new IllegalArgumentException(
+                                "conflicting HTTP representation mapping key: " + binding.mappingKey());
+                        }
+                    }
                 }
             }
-            return new HttpOperationBindingCatalog(values);
+            return new HttpOperationBindingCatalog(List.copyOf(values.values()));
         } catch (IOException failure) {
             throw new IllegalStateException("unable to load HTTP operation representation bindings", failure);
         }
