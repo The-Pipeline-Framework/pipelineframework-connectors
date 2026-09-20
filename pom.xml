@@ -108,7 +108,7 @@
                             <excludeArtifacts>
                                 <excludeArtifact>framework-connectors</excludeArtifact>
                                 <excludeArtifact>host-gmail</excludeArtifact><excludeArtifact>host-microsoft-graph</excludeArtifact><excludeArtifact>host-oidc-quarkus</excludeArtifact><excludeArtifact>host-quickbooks-mcp</excludeArtifact>
-                                <excludeArtifact>representation-provider-file</excludeArtifact><excludeArtifact>representation-provider-fixture</excludeArtifact><excludeArtifact>representation-provider-http</excludeArtifact>
+                                <excludeArtifact>representation-provider-file</excludeArtifact><excludeArtifact>representation-provider-fixture</excludeArtifact>
                             </excludeArtifacts>
                             <autoPublish>true</autoPublish><waitUntil>published</waitUntil><waitMaxTime>7200</waitMaxTime>
                         </configuration>
