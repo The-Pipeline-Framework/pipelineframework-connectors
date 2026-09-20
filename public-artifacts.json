@@ -18,6 +18,7 @@
     {"artifactId": "llm-query-langchain4j-connector", "packaging": "jar"},
     {"artifactId": "gmail-query-connector", "packaging": "jar"},
     {"artifactId": "http-connector", "packaging": "jar"},
+    {"artifactId": "representation-provider-http", "packaging": "jar"},
     {"artifactId": "mcp-connector", "packaging": "jar"},
     {"artifactId": "connector-import-tooling", "packaging": "jar"},
     {"artifactId": "connector-maven-plugin", "packaging": "maven-plugin"},
@@ -28,8 +29,7 @@
   "internalArtifacts": [
     "framework-connectors",
     "host-gmail", "host-microsoft-graph", "host-oidc-quarkus",
-    "host-quickbooks-mcp", "representation-provider-file", "representation-provider-fixture",
-    "representation-provider-http"
+    "host-quickbooks-mcp", "representation-provider-file", "representation-provider-fixture"
   ],
   "externalArtifacts": [
     {"artifactId": "pipelineframework", "packaging": "jar", "ownership": "external", "note": "Published from the standalone pipelineframework-runtime repository"},
