@@ -95,7 +95,7 @@ async function main() {
   const commitSha = (await refResponse.json()).object?.sha;
   if (typeof commitSha !== 'string' || !/^[0-9a-f]{40}$/.test(commitSha)) throw new Error('No monorepo main commit returned');
   const [manifestJson, frameworkPom, connectorsPom, ...mirrorPoms] = await Promise.all([
-    githubFile('framework/public-artifacts.json', commitSha), githubFile('framework/pom.xml', commitSha), githubFile('framework/connectors/pom.xml', commitSha),
+    githubFile('framework/public-artifacts.json', commitSha), githubFile('framework/pom.xml', commitSha), githubFile('framework/connectors/pom.xml', commitSha, true),
     ...publishedArtifacts.map(({ mirrorPath }) => githubFile(mirrorPath, commitSha, true)),
   ]);
   const mirrors = Object.fromEntries(publishedArtifacts.map(({ artifactId }, index) => [artifactId, mirrorPoms[index]]));
