@@ -22,6 +22,7 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
+          cache-path: ${{ github.workspace }}/.m2/repository
       - name: Verify
         run: ./mvnw -B -V -Dmaven.repo.local="$PWD/.m2/repository" clean verify -DskipTests -Dgpg.skip
       - name: Verify publication contract
