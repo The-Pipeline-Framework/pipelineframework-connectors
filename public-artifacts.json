@@ -16,6 +16,8 @@
     {"artifactId": "vector-store-pgvector-connector", "packaging": "jar"},
     {"artifactId": "llm-query-connector", "packaging": "jar"},
     {"artifactId": "llm-query-langchain4j-connector", "packaging": "jar"},
+    {"artifactId": "decision-query-connector", "packaging": "jar"},
+    {"artifactId": "decision-query-jev-connector", "packaging": "jar"},
     {"artifactId": "gmail-query-connector", "packaging": "jar"},
     {"artifactId": "http-connector", "packaging": "jar"},
     {"artifactId": "representation-provider-http", "packaging": "jar"},
