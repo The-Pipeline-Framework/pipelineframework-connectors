@@ -102,6 +102,25 @@ final class JevDecisionClientTest {
     }
 
     @Test
+    void rejectsHttpClientsThatFollowRedirectsBeforeAcceptingCredentials() {
+        HttpClient redirectingClient =
+            HttpClient.newBuilder().followRedirects(HttpClient.Redirect.ALWAYS).build();
+
+        assertThrows(IllegalArgumentException.class, () ->
+            AuthenticatedJevConnection.bearer(redirectingClient, "secret"));
+    }
+
+    @Test
+    void rejectsFractionalUsageCounters() throws Exception {
+        assertInvalidUsage("{\"input_tokens\":1.5,\"output_tokens\":2}");
+    }
+
+    @Test
+    void rejectsOverflowingUsageTotals() throws Exception {
+        assertInvalidUsage("{\"input_tokens\":9223372036854775807,\"output_tokens\":1}");
+    }
+
+    @Test
     void classifiesNonTransportAsynchronousFailuresAsTerminal() {
         DecisionProviderFailureException failure =
             JevDecisionClient.transportFailure(new CompletionException(new SecurityException("denied")));
@@ -141,6 +160,25 @@ final class JevDecisionClientTest {
     private DecisionQuestion choice(String name, String... labels) {
         return new DecisionQuestion(name, DecisionQuestionType.CHOICE, "Choose",
             java.util.Arrays.stream(labels).map(label -> new DecisionCriterion(label, label)).toList());
+    }
+
+    private void assertInvalidUsage(String usage) throws Exception {
+        String response = """
+            {"model":"typesafe/jev-1.13","answers":{
+              "supplier":{"type":"choice","choice":"EXPLICIT_TEXT","confidence":0.8,
+                "probabilities":{"EXPLICIT_TEXT":0.8,"INSUFFICIENT":0.2}}
+            },"usage":%s}
+            """.formatted(usage);
+        start(new AtomicReference<>(), response, 200);
+
+        CompletionException failure = assertThrows(CompletionException.class, () -> client()
+            .decide(new DecisionRequest("{}", List.of(choice("supplier", "EXPLICIT_TEXT", "INSUFFICIENT"))))
+            .toCompletableFuture().join());
+
+        DecisionProviderFailureException providerFailure =
+            assertInstanceOf(DecisionProviderFailureException.class, failure.getCause());
+        assertEquals(DecisionProviderFailureException.Kind.TERMINAL, providerFailure.kind());
+        assertEquals("decision-provider-invalid-response", providerFailure.outcomeCode());
     }
 
     private JevDecisionClient client() {

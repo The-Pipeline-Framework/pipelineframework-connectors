@@ -14,9 +14,14 @@ public final class AuthenticatedJevConnection implements org.pipelineframework.c
     private final String apiKey;
 
     private AuthenticatedJevConnection(HttpClient client, String apiKey) {
-        this.client = Objects.requireNonNull(client, "Jev HTTP client must not be null");
-        this.apiKey = Objects.requireNonNull(apiKey, "Jev API key must not be null").trim();
-        if (this.apiKey.isEmpty()) throw new IllegalArgumentException("Jev API key must not be blank");
+        HttpClient validatedClient = Objects.requireNonNull(client, "Jev HTTP client must not be null");
+        if (validatedClient.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("Jev HTTP client must not follow redirects");
+        }
+        String validatedApiKey = Objects.requireNonNull(apiKey, "Jev API key must not be null").trim();
+        if (validatedApiKey.isEmpty()) throw new IllegalArgumentException("Jev API key must not be blank");
+        this.client = validatedClient;
+        this.apiKey = validatedApiKey;
     }
 
     /** Uses a host-owned client whose lifecycle is longer than any resolved connection. */

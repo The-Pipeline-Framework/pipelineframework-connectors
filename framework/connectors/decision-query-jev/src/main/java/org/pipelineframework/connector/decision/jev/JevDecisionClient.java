@@ -114,9 +114,14 @@ final class JevDecisionClient implements DecisionClient {
         Optional<QueryTokenUsage> tokens = optionalObject(root, "usage").map(usage -> {
             OptionalLong inputTokens = optionalNonNegativeLong(usage, "input_tokens");
             OptionalLong outputTokens = optionalNonNegativeLong(usage, "output_tokens");
-            OptionalLong totalTokens = inputTokens.isPresent() && outputTokens.isPresent()
-                ? OptionalLong.of(Math.addExact(inputTokens.getAsLong(), outputTokens.getAsLong()))
-                : OptionalLong.empty();
+            OptionalLong totalTokens = OptionalLong.empty();
+            if (inputTokens.isPresent() && outputTokens.isPresent()) {
+                try {
+                    totalTokens = OptionalLong.of(Math.addExact(inputTokens.getAsLong(), outputTokens.getAsLong()));
+                } catch (ArithmeticException failure) {
+                    throw invalid("Jev usage token total exceeds the supported range", failure);
+                }
+            }
             return new QueryTokenUsage(inputTokens, outputTokens, totalTokens);
         });
         QueryObservation observation = QueryObservation.live(tokens, responseModel, Optional.empty());
@@ -320,7 +325,7 @@ final class JevDecisionClient implements DecisionClient {
     private static OptionalLong optionalNonNegativeLong(JsonNode node, String field) {
         JsonNode value = node.get(field);
         if (value == null || value.isNull()) return OptionalLong.empty();
-        if (!value.canConvertToLong() || value.longValue() < 0) {
+        if (!value.isIntegralNumber() || !value.canConvertToLong() || value.longValue() < 0) {
             throw invalid("Jev usage field " + field + " must be a non-negative integer");
         }
         return OptionalLong.of(value.longValue());
