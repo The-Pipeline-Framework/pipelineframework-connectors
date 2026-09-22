@@ -19,10 +19,7 @@ public final class AuthenticatedJevConnection implements org.pipelineframework.c
         if (this.apiKey.isEmpty()) throw new IllegalArgumentException("Jev API key must not be blank");
     }
 
-    public static AuthenticatedJevConnection bearer(String apiKey) {
-        return new AuthenticatedJevConnection(HttpClient.newBuilder().build(), apiKey);
-    }
-
+    /** Uses a host-owned client whose lifecycle is longer than any resolved connection. */
     public static AuthenticatedJevConnection bearer(HttpClient client, String apiKey) {
         return new AuthenticatedJevConnection(client, apiKey);
     }

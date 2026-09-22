@@ -3,6 +3,7 @@ package org.pipelineframework.connector.decision.jev;
 import java.math.BigDecimal;
 import java.io.IOException;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.http.HttpTimeoutException;
 import java.net.http.HttpResponse;
 import java.time.Duration;
@@ -39,7 +40,7 @@ final class JevDecisionClient implements DecisionClient {
 
     JevDecisionClient(AuthenticatedJevConnection connection, String baseUrl, String model, Duration timeout) {
         this.connection = java.util.Objects.requireNonNull(connection);
-        this.endpoint = URI.create(baseUrl.replaceAll("/+$", "") + "/v1/systemone");
+        this.endpoint = endpoint(baseUrl);
         this.model = java.util.Objects.requireNonNull(model);
         this.timeout = java.util.Objects.requireNonNull(timeout);
         if (timeout.isZero() || timeout.isNegative()) throw new IllegalArgumentException("Jev timeout must be positive");
@@ -101,7 +102,7 @@ final class JevDecisionClient implements DecisionClient {
         } catch (Exception failure) {
             throw invalid("Jev response is not valid JSON", failure);
         }
-        String responseModel = requiredText(root, "model");
+        Optional<String> responseModel = optionalText(root, "model");
         JsonNode answers = requiredObject(root, "answers");
         if (answers.size() != request.questions().size()) throw invalid("Jev returned an unexpected answer count");
         List<DecisionAnswer> decoded = new ArrayList<>();
@@ -110,13 +111,15 @@ final class JevDecisionClient implements DecisionClient {
             if (answer == null || !answer.isObject()) throw invalid("Jev omitted answer " + question.name());
             decoded.add(decode(question, answer));
         }
-        JsonNode usage = requiredObject(root, "usage");
-        long inputTokens = requiredNonNegativeLong(usage, "input_tokens");
-        long outputTokens = requiredNonNegativeLong(usage, "output_tokens");
-        QueryTokenUsage tokens = new QueryTokenUsage(OptionalLong.of(inputTokens), OptionalLong.of(outputTokens),
-            OptionalLong.of(Math.addExact(inputTokens, outputTokens)));
-        QueryObservation observation = QueryObservation.live(Optional.of(tokens), Optional.of(responseModel),
-            Optional.empty());
+        Optional<QueryTokenUsage> tokens = optionalObject(root, "usage").map(usage -> {
+            OptionalLong inputTokens = optionalNonNegativeLong(usage, "input_tokens");
+            OptionalLong outputTokens = optionalNonNegativeLong(usage, "output_tokens");
+            OptionalLong totalTokens = inputTokens.isPresent() && outputTokens.isPresent()
+                ? OptionalLong.of(Math.addExact(inputTokens.getAsLong(), outputTokens.getAsLong()))
+                : OptionalLong.empty();
+            return new QueryTokenUsage(inputTokens, outputTokens, totalTokens);
+        });
+        QueryObservation observation = QueryObservation.live(tokens, responseModel, Optional.empty());
         return new DecisionResponse(new DecisionResult(decoded), Optional.of(observation));
     }
 
@@ -144,11 +147,49 @@ final class JevDecisionClient implements DecisionClient {
             case SCORE -> {
                 BigDecimal score = requiredDecimal(answer, "score");
                 BigDecimal confidence = probability(answer, "confidence");
-                List<DecisionProbability> probabilities = probabilities(requiredObject(answer, "probabilities"));
-                validateLegend(question, requiredObject(answer, "legend"));
+                List<DecisionProbability> probabilities = scoreProbabilities(
+                    question, requiredObject(answer, "probabilities"));
+                optionalObject(answer, "legend").ifPresent(legend -> validateLegend(question, legend));
                 yield new DecisionAnswer(question.name(), question.type(), "", score, confidence, probabilities);
             }
         };
+    }
+
+    private static URI endpoint(String baseUrl) {
+        String value = java.util.Objects.requireNonNull(baseUrl, "Jev base URL must not be null").trim();
+        final URI base;
+        try {
+            base = URI.create(value);
+        } catch (IllegalArgumentException failure) {
+            throw new IllegalArgumentException("Jev base URL must be a valid absolute URI", failure);
+        }
+        String scheme = base.getScheme();
+        String host = base.getHost();
+        if (scheme == null || host == null || base.getUserInfo() != null || base.getQuery() != null
+            || base.getFragment() != null) {
+            throw new IllegalArgumentException("Jev base URL must be an absolute HTTP(S) URI without credentials, query or fragment");
+        }
+        boolean loopback = host.equalsIgnoreCase("localhost") || host.equals("127.0.0.1") || host.equals("::1");
+        if (!scheme.equalsIgnoreCase("https") && !(scheme.equalsIgnoreCase("http") && loopback)) {
+            throw new IllegalArgumentException("Jev base URL must use HTTPS, except for a loopback HTTP endpoint");
+        }
+
+        String path = Optional.ofNullable(base.getPath()).orElse("").replaceAll("/+$", "");
+        String endpointPath;
+        if (path.endsWith("/v1")) {
+            endpointPath = path.substring(0, path.length() - 3) + "/alpha/decisions";
+        } else if (path.endsWith("/alpha")) {
+            endpointPath = path + "/decisions";
+        } else if (path.endsWith("/alpha/decisions") || path.endsWith("/v1/systemone")) {
+            endpointPath = path;
+        } else {
+            endpointPath = path + "/v1/systemone";
+        }
+        try {
+            return new URI(base.getScheme(), null, base.getHost(), base.getPort(), endpointPath, null, null);
+        } catch (URISyntaxException failure) {
+            throw new IllegalArgumentException("Jev base URL cannot be converted to a decision endpoint", failure);
+        }
     }
 
     private static List<DecisionProbability> probabilities(JsonNode node) {
@@ -157,6 +198,29 @@ final class JevDecisionClient implements DecisionClient {
             new DecisionProbability(entry.getKey(), decimalProbability(entry.getValue(), entry.getKey()))));
         result.sort(Comparator.comparing(DecisionProbability::label));
         return List.copyOf(result);
+    }
+
+    private static List<DecisionProbability> scoreProbabilities(DecisionQuestion question, JsonNode node) {
+        DecisionProbability[] result = new DecisionProbability[question.criteria().size()];
+        node.fields().forEachRemaining(entry -> {
+            final int index;
+            try {
+                if (!entry.getKey().matches("0|[1-9][0-9]*")) throw new NumberFormatException();
+                index = Integer.parseInt(entry.getKey());
+            } catch (NumberFormatException failure) {
+                throw invalid("Jev score probability key must be a criterion index: " + entry.getKey());
+            }
+            if (index >= result.length) {
+                throw invalid("Jev score probability index is outside the supplied rubric: " + entry.getKey());
+            }
+            result[index] = new DecisionProbability(
+                question.criteria().get(index).label(), decimalProbability(entry.getValue(), entry.getKey()));
+        });
+        List<DecisionProbability> mapped = new ArrayList<>();
+        for (DecisionProbability probability : result) {
+            if (probability != null) mapped.add(probability);
+        }
+        return List.copyOf(mapped);
     }
 
     private static void validateLegend(DecisionQuestion question, JsonNode legend) {
@@ -186,7 +250,7 @@ final class JevDecisionClient implements DecisionClient {
             "Jev request failed with HTTP " + status);
     }
 
-    private static DecisionProviderFailureException transportFailure(Throwable failure) {
+    static DecisionProviderFailureException transportFailure(Throwable failure) {
         Throwable cause = failure;
         while (cause instanceof CompletionException && cause.getCause() != null) cause = cause.getCause();
         String message = cause instanceof HttpTimeoutException ? "Jev request timed out" : "Jev transport failed";
@@ -198,9 +262,9 @@ final class JevDecisionClient implements DecisionClient {
                 cause);
         }
         return new DecisionProviderFailureException(
-            DecisionProviderFailureException.Kind.TEMPORARILY_UNAVAILABLE,
-            "jev-transport-failed",
-            message,
+            DecisionProviderFailureException.Kind.TERMINAL,
+            "jev-request-failed",
+            "Jev request failed",
             cause);
     }
 
@@ -210,12 +274,28 @@ final class JevDecisionClient implements DecisionClient {
         return value;
     }
 
+    private static Optional<JsonNode> optionalObject(JsonNode node, String field) {
+        JsonNode value = node == null ? null : node.get(field);
+        if (value == null || value.isNull()) return Optional.empty();
+        if (!value.isObject()) throw invalid("Jev response field " + field + " must be an object");
+        return Optional.of(value);
+    }
+
     private static String requiredText(JsonNode node, String field) {
         JsonNode value = node == null ? null : node.get(field);
         if (value == null || !value.isTextual() || value.textValue().isBlank()) {
             throw invalid("Jev response field " + field + " must be non-blank text");
         }
         return value.textValue();
+    }
+
+    private static Optional<String> optionalText(JsonNode node, String field) {
+        JsonNode value = node == null ? null : node.get(field);
+        if (value == null || value.isNull()) return Optional.empty();
+        if (!value.isTextual() || value.textValue().isBlank()) {
+            throw invalid("Jev response field " + field + " must be non-blank text");
+        }
+        return Optional.of(value.textValue());
     }
 
     private static BigDecimal requiredDecimal(JsonNode node, String field) {
@@ -237,12 +317,13 @@ final class JevDecisionClient implements DecisionClient {
         return probability;
     }
 
-    private static long requiredNonNegativeLong(JsonNode node, String field) {
+    private static OptionalLong optionalNonNegativeLong(JsonNode node, String field) {
         JsonNode value = node.get(field);
-        if (value == null || !value.canConvertToLong() || value.longValue() < 0) {
+        if (value == null || value.isNull()) return OptionalLong.empty();
+        if (!value.canConvertToLong() || value.longValue() < 0) {
             throw invalid("Jev usage field " + field + " must be a non-negative integer");
         }
-        return value.longValue();
+        return OptionalLong.of(value.longValue());
     }
 
     private static DecisionProviderFailureException invalid(String message) {

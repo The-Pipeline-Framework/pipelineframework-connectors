@@ -55,9 +55,59 @@ final class JevDecisionClientTest {
         assertEquals(new BigDecimal("0.7"), result.result().answers().get(1).confidence());
         assertEquals(2, result.result().answers().get(1).probabilities().size());
         assertEquals("jev-test", result.observation().orElseThrow().responseModel().orElseThrow());
-        assertEquals("jev-latest", requestBody.get().get("model").textValue());
+        assertEquals("typesafe/jev-1.13", requestBody.get().get("model").textValue());
         assertTrue(requestBody.get().get("questions").has("supplier"));
         assertTrue(requestBody.get().get("questions").has("property"));
+    }
+
+    @Test
+    void decodesNoulAndMapsScoreIndexesToDeclaredLabels() throws Exception {
+        AtomicReference<JsonNode> requestBody = new AtomicReference<>();
+        String response = """
+            {"answers":{
+              "needsReview":{"type":"noul","noul":0.73},
+              "urgency":{"type":"score","score":1.4,"confidence":0.6,
+                "probabilities":{"0":0.1,"1":0.4,"2":0.5}}
+            }}
+            """;
+        start(requestBody, response, 200);
+        JevDecisionClient client = client();
+        DecisionQuestion noul = new DecisionQuestion("needsReview", DecisionQuestionType.NOUL, "Review?", List.of(
+            new DecisionCriterion("false", "No review"), new DecisionCriterion("true", "Needs review")));
+        DecisionQuestion score = new DecisionQuestion("urgency", DecisionQuestionType.SCORE, "Urgency", List.of(
+            new DecisionCriterion("LOW", "low"), new DecisionCriterion("MEDIUM", "medium"),
+            new DecisionCriterion("HIGH", "high")));
+
+        var result = client.decide(new DecisionRequest("{}", List.of(noul, score))).toCompletableFuture().join();
+
+        assertEquals(new BigDecimal("0.73"), result.result().answers().get(0).value());
+        assertEquals(List.of("false", "true"), result.result().answers().get(0).probabilities().stream()
+            .map(probability -> probability.label()).toList());
+        assertEquals(List.of("LOW", "MEDIUM", "HIGH"), result.result().answers().get(1).probabilities().stream()
+            .map(probability -> probability.label()).toList());
+        assertEquals(new BigDecimal("0.5"), result.result().answers().get(1).probabilities().get(2).probability());
+        assertEquals("noul", requestBody.get().path("questions").path("needsReview").path("type").textValue());
+        assertEquals("score", requestBody.get().path("questions").path("urgency").path("type").textValue());
+    }
+
+    @Test
+    void rejectsInsecureRemoteAndUnsupportedBaseUrisBeforeSending() {
+        AuthenticatedJevConnection connection =
+            AuthenticatedJevConnection.bearer(HttpClient.newHttpClient(), "secret");
+
+        assertThrows(IllegalArgumentException.class, () -> new JevDecisionClient(
+            connection, "http://example.com/api/v1", "typesafe/jev-1.13", Duration.ofSeconds(2)));
+        assertThrows(IllegalArgumentException.class, () -> new JevDecisionClient(
+            connection, "ftp://example.com/api/v1", "typesafe/jev-1.13", Duration.ofSeconds(2)));
+    }
+
+    @Test
+    void classifiesNonTransportAsynchronousFailuresAsTerminal() {
+        DecisionProviderFailureException failure =
+            JevDecisionClient.transportFailure(new CompletionException(new SecurityException("denied")));
+
+        assertEquals(DecisionProviderFailureException.Kind.TERMINAL, failure.kind());
+        assertEquals("jev-request-failed", failure.outcomeCode());
     }
 
     @Test
@@ -95,12 +145,13 @@ final class JevDecisionClientTest {
 
     private JevDecisionClient client() {
         return new JevDecisionClient(AuthenticatedJevConnection.bearer(HttpClient.newHttpClient(), "secret"),
-            "http://127.0.0.1:" + server.getAddress().getPort(), "jev-latest", Duration.ofSeconds(2));
+            "http://127.0.0.1:" + server.getAddress().getPort() + "/api/v1", "typesafe/jev-1.13",
+            Duration.ofSeconds(2));
     }
 
     private void start(AtomicReference<JsonNode> body, String response, int status) throws Exception {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/v1/systemone", exchange -> {
+        server.createContext("/api/alpha/decisions", exchange -> {
             body.set(JSON.readTree(exchange.getRequestBody()));
             byte[] bytes = response.getBytes(java.nio.charset.StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(status, bytes.length);

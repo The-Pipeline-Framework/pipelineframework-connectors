@@ -21,7 +21,7 @@ import org.pipelineframework.connector.decision.DecisionQueryConnectorProvider;
 @Unremovable
 public final class JevDecisionQueryConnector extends DecisionQueryConnectorProvider {
     public static final ConnectorProviderId PROVIDER_ID = ConnectorProviderId.of("decision.query.jev");
-    private static final String DEFAULT_BASE_URL = "https://api.typesafe.ai";
+    private static final String DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
     private final RuntimeConfiguration runtime;
 
     public JevDecisionQueryConnector() {
