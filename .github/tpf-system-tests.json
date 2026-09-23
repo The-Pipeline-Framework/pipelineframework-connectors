@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "suites": {
+    "verify": {
+      "command": ["bash", "scripts/system-tests.sh", "verify"],
+      "timeoutMinutes": 90
+    },
+    "live-providers": {
+      "command": ["bash", "scripts/system-tests.sh", "live-providers"],
+      "timeoutMinutes": 90
+    }
+  }
+}
