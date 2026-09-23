@@ -76,9 +76,13 @@ for artifact, coordinate in zip(artifacts, coordinates, strict=True):
         assert hashlib.sha256(path.read_bytes()).hexdigest() == item["sha256"], f"checksum mismatch: {path}"
         expected_paths.add(path.relative_to(root / "repository").as_posix())
     pom = ET.parse(directory / f"{name}-{version}.pom").getroot()
-    assert pom.findtext("{http://maven.apache.org/POM/4.0.0}groupId") == group
+    ns = "{http://maven.apache.org/POM/4.0.0}"
+    parent = pom.find(ns + "parent")
+    actual_group = pom.findtext(ns + "groupId") or (parent.findtext(ns + "groupId") if parent is not None else "")
+    actual_version = pom.findtext(ns + "version") or (parent.findtext(ns + "version") if parent is not None else "")
+    assert actual_group == group
     assert pom.findtext("{http://maven.apache.org/POM/4.0.0}artifactId") == name
-    assert pom.findtext("{http://maven.apache.org/POM/4.0.0}version") == version
+    assert actual_version == version
 actual_paths = {path.relative_to(root / "repository").as_posix() for path in (root / "repository").rglob("*") if path.is_file()}
 assert actual_paths == expected_paths, f"unexpected candidate repository files: {actual_paths ^ expected_paths}"
 assert not any(path.is_symlink() for path in (root / "repository").rglob("*")), "symlink in candidate repository"

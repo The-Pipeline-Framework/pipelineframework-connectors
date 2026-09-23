@@ -20,8 +20,14 @@ for event, number in (("pull_request", "42"), ("push", "")):
             group, artifact, packaging = coordinate["groupId"], coordinate["artifactId"], coordinate["packaging"]
             directory = repository.joinpath(*group.split("."), artifact, candidate)
             directory.mkdir(parents=True)
-            (directory / f"{artifact}-{candidate}.pom").write_text(
-                f'<project xmlns="http://maven.apache.org/POM/4.0.0"><groupId>{group}</groupId><artifactId>{artifact}</artifactId><version>{candidate}</version><packaging>{packaging}</packaging></project>\n')
+            if artifact == "connector-import-tooling":
+                pom = (f'<project xmlns="http://maven.apache.org/POM/4.0.0"><parent><groupId>{group}</groupId>'
+                       f'<artifactId>pipelineframework-connectors-parent</artifactId><version>{candidate}</version>'
+                       f'</parent><artifactId>{artifact}</artifactId><packaging>{packaging}</packaging></project>\n')
+            else:
+                pom = (f'<project xmlns="http://maven.apache.org/POM/4.0.0"><groupId>{group}</groupId>'
+                       f'<artifactId>{artifact}</artifactId><version>{candidate}</version><packaging>{packaging}</packaging></project>\n')
+            (directory / f"{artifact}-{candidate}.pom").write_text(pom)
             if packaging != "pom":
                 (directory / f"{artifact}-{candidate}.jar").write_bytes(f"fixture:{artifact}".encode())
         env = os.environ | {

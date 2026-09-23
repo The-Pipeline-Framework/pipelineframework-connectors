@@ -46,7 +46,12 @@ for coordinate in coordinates:
         if name.endswith(".pom"):
             pom = ET.parse(path).getroot()
             ns = "{http://maven.apache.org/POM/4.0.0}"
-            actual = (pom.findtext(ns + "groupId", ""), pom.findtext(ns + "artifactId", ""), pom.findtext(ns + "version", ""))
+            parent = pom.find(ns + "parent")
+            actual = (
+                pom.findtext(ns + "groupId") or (parent.findtext(ns + "groupId") if parent is not None else ""),
+                pom.findtext(ns + "artifactId", ""),
+                pom.findtext(ns + "version") or (parent.findtext(ns + "version") if parent is not None else ""),
+            )
             if actual != (group_id, artifact_id, candidate_version):
                 raise SystemExit(f"candidate-version output does not match installed POM for {group_id}:{artifact_id}")
         files.append({"name": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
