@@ -32,6 +32,34 @@ jobs:
           cache-path: ${{ github.workspace }}/.m2/repository
       - name: Verify
         run: ./mvnw -B -V -Dmaven.repo.local="$PWD/.m2/repository" clean verify -DskipITs -Dgpg.skip
+      - name: Summarize unit-test coverage
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+
+          reports = glob.glob('**/target/site/jacoco/jacoco.xml', recursive=True)
+          missed = covered = 0
+          for report in reports:
+              root = ET.parse(report).getroot()
+              counter = next((item for item in root.findall('counter') if item.attrib['type'] == 'LINE'), None)
+              if counter is not None:
+                  missed += int(counter.attrib['missed'])
+                  covered += int(counter.attrib['covered'])
+          total = missed + covered
+          percent = f'{covered / total:.1%}' if total else 'n/a'
+          with open(__import__('os').environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write(f'### Unit-test line coverage\n\n{percent} ({covered} of {total} lines) across {len(reports)} modules.\n')
+          PY
+      - name: Upload JaCoCo reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: jacoco-unit-coverage
+          path: '**/target/site/jacoco/**'
+          if-no-files-found: warn
+          retention-days: 14
       - name: Verify publication contract
         run: |
           node --test scripts/verify-ci-workflow.test.mjs scripts/verify-connector-publication.test.mjs
