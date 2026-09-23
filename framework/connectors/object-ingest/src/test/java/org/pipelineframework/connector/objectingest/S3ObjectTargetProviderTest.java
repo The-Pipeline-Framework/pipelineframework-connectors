@@ -12,9 +12,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.nio.ByteBuffer;
+import java.io.ByteArrayInputStream;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -27,6 +30,10 @@ import org.pipelineframework.objectpublish.ObjectWriteCloseRequest;
 import org.pipelineframework.objectpublish.ObjectWriteOpenRequest;
 import org.pipelineframework.objectpublish.ObjectWriteResult;
 import org.pipelineframework.objectpublish.ObjectWriteSession;
+import org.pipelineframework.objectpublish.PagedObjectCompositionRequest;
+
+import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.http.AbortableInputStream;
 
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -36,6 +43,12 @@ import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 import software.amazon.awssdk.services.s3.model.UploadPartResponse;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 
 class S3ObjectTargetProviderTest {
 
@@ -212,6 +225,49 @@ class S3ObjectTargetProviderTest {
             () -> provider.open(openRequest()).toCompletableFuture().join());
 
         assertEquals("S3 object target provider is closed", exception.getCause().getMessage());
+    }
+
+    @Test
+    void streamComposesS3PagePartsWithFinalObjectParity() throws Exception {
+        S3Client client = mock(S3Client.class);
+        byte[] first = "first,\"María\nGarcía\"\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] second = "second,Zoë\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        when(client.headObject(any(HeadObjectRequest.class))).thenAnswer(invocation -> {
+            HeadObjectRequest request = invocation.getArgument(0);
+            return HeadObjectResponse.builder()
+                .contentLength(request.key().endsWith("page-0.part") ? (long) first.length : (long) second.length)
+                .build();
+        });
+        when(client.getObject(
+            org.mockito.Mockito.<GetObjectRequest>any(),
+            any(software.amazon.awssdk.core.sync.ResponseTransformer.class)))
+            .thenAnswer(invocation -> {
+                software.amazon.awssdk.services.s3.model.GetObjectRequest request = invocation.getArgument(0);
+                byte[] bytes = request.key().endsWith("page-0.part") ? first : second;
+                return new ResponseInputStream<>(GetObjectResponse.builder().build(),
+                    AbortableInputStream.create(new ByteArrayInputStream(bytes)));
+            });
+        AtomicReference<byte[]> published = new AtomicReference<>();
+        when(client.putObject(any(PutObjectRequest.class), any(RequestBody.class))).thenAnswer(invocation -> {
+            RequestBody body = invocation.getArgument(1);
+            try (var input = body.contentStreamProvider().newStream()) {
+                published.set(input.readAllBytes());
+            }
+            return PutObjectResponse.builder().eTag("final-etag").build();
+        });
+        S3ObjectTargetProvider provider = new S3ObjectTargetProvider(client, Runnable::run, 5 * 1024 * 1024);
+        PipelineObjectPublishConfig target = openRequest().target();
+
+        ObjectWriteResult result = provider.compose(new PagedObjectCompositionRequest(
+            target.name(), target, "payments.csv", "text/csv", Map.of("recordCount", "2"),
+            "compose-run", "header\n".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            List.of(".tpf/page-0.part", ".tpf/page-1.part"),
+            "footer\n".getBytes(java.nio.charset.StandardCharsets.UTF_8))).toCompletableFuture().join();
+
+        assertEquals("header\nfirst,\"María\nGarcía\"\nsecond,Zoë\nfooter\n",
+            new String(published.get(), java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(published.get().length, result.bytes());
+        assertEquals(sha256(published.get()), result.checksum());
     }
 
     private ObjectWriteOpenRequest openRequest() {

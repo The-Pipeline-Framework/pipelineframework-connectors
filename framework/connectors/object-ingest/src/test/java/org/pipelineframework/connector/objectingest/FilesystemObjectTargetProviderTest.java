@@ -19,6 +19,8 @@ import org.pipelineframework.objectpublish.ObjectWriteCloseRequest;
 import org.pipelineframework.objectpublish.ObjectWriteOpenRequest;
 import org.pipelineframework.objectpublish.ObjectWriteResult;
 import org.pipelineframework.objectpublish.ObjectWriteSession;
+import org.pipelineframework.objectpublish.PagedObjectCompositionRequest;
+import org.pipelineframework.objectpublish.PagedObjectPartQuery;
 
 class FilesystemObjectTargetProviderTest {
 
@@ -83,6 +85,27 @@ class FilesystemObjectTargetProviderTest {
         assertTrue(exception.getCause() instanceof SecurityException);
     }
 
+    @Test
+    void composesCommittedPagePartsInOrderWithOnePrefixAndSuffix() throws Exception {
+        FilesystemObjectTargetProvider provider = new FilesystemObjectTargetProvider(Runnable::run);
+        PipelineObjectPublishConfig target = target(tempDir);
+        writePagePart(provider, target, ".tpf-pages/run/group/page-000.part", 0, "first,\"María\nGarcía\"\n");
+        writePagePart(provider, target, ".tpf-pages/run/group/page-001.part", 1, "second,Zoë\n");
+
+        var parts = provider.listParts(new PagedObjectPartQuery(
+            target.name(), target, ".tpf-pages/run/")).toCompletableFuture().join();
+        ObjectWriteResult result = provider.compose(new PagedObjectCompositionRequest(
+            target.name(), target, "results/payments.csv", "text/csv", Map.of("recordCount", "2"),
+            "compose-run", "header\n".getBytes(StandardCharsets.UTF_8),
+            parts.stream().map(part -> part.objectKey()).toList(),
+            "footer\n".getBytes(StandardCharsets.UTF_8))).toCompletableFuture().join();
+
+        assertEquals(2, parts.size());
+        assertEquals("header\nfirst,\"María\nGarcía\"\nsecond,Zoë\nfooter\n",
+            Files.readString(tempDir.resolve("results/payments.csv")));
+        assertEquals(Files.size(tempDir.resolve("results/payments.csv")), result.bytes());
+    }
+
     private PipelineObjectPublishConfig target(Path root) {
         return new PipelineObjectPublishConfig(
             "results",
@@ -108,5 +131,27 @@ class FilesystemObjectTargetProviderTest {
             .toCompletableFuture().join();
         session.write(ByteBuffer.wrap(payload.getBytes(StandardCharsets.UTF_8))).toCompletableFuture().join();
         session.close(new ObjectWriteCloseRequest(payload.length(), "checksum", Map.of())).toCompletableFuture().join();
+    }
+
+    private void writePagePart(
+        FilesystemObjectTargetProvider provider,
+        PipelineObjectPublishConfig target,
+        String key,
+        int pageIndex,
+        String payload) {
+        Map<String, String> metadata = Map.of(
+            "tpf.page.index", String.valueOf(pageIndex),
+            "tpf.page.group", "payments",
+            "tpf.page.finalKey", "results/payments.csv",
+            "tpf.page.contentType", "text/csv",
+            "tpf.page.partKey", key,
+            "recordCount", "1");
+        ObjectWriteSession session = provider.open(new ObjectWriteOpenRequest(
+            target.name(), target, key, "text/csv", metadata, "page-" + pageIndex))
+            .toCompletableFuture().join();
+        byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
+        session.write(ByteBuffer.wrap(bytes)).toCompletableFuture().join();
+        session.close(new ObjectWriteCloseRequest(bytes.length, "checksum-" + pageIndex, metadata))
+            .toCompletableFuture().join();
     }
 }
