@@ -3,7 +3,7 @@
     <modelVersion>4.0.0</modelVersion>
     <parent><groupId>org.pipelineframework</groupId><artifactId>pipelineframework-connectors-parent</artifactId><version>26.9.4-SNAPSHOT</version><relativePath>../../../pom.xml</relativePath></parent>
     <artifactId>decision-query-connector</artifactId>
-    <properties><maven.deploy.skip>false</maven.deploy.skip><pipelineframework.contracts.version>26.9.3</pipelineframework.contracts.version></properties>
+    <properties><maven.deploy.skip>false</maven.deploy.skip></properties>
     <name>The Pipeline Framework - Bounded Decision Query Connector</name>
     <description>Provider-neutral bounded probabilistic decision Query contract.</description>
     <dependencies>
