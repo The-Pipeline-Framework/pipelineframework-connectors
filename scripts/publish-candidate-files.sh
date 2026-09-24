@@ -19,7 +19,7 @@ while IFS=$'\t' read -r group_id artifact_id packaging; do
   pom="$directory/$artifact_id-$version.pom"
   artifact=""
   if [[ "$packaging" != pom ]]; then artifact="$directory/$artifact_id-$version.jar"; fi
-  resolved_directory="$temporary/repository/${group_id//./\/}/$artifact_id/$version"
+  resolved_directory="$temporary/maven-repository/${group_id//./\/}/$artifact_id/$version"
   resolved_pom="$resolved_directory/$artifact_id-$version.pom"
   resolved_artifact=""
   if [[ "$packaging" != pom ]]; then resolved_artifact="$resolved_directory/$artifact_id-$version.jar"; fi
