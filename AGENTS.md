@@ -1,7 +1,39 @@
-# Connectors repository boundary
+# Connectors Repository Instructions
 
-This repository owns the TPF connector surface: every module under `framework/connectors`, connector import/plugin tooling, representation-provider implementations, and the TPF-owned OIDC, Gmail, Microsoft Graph, and QuickBooks MCP host integrations.
+This repository owns TPF Connector implementations, import tooling, representation-provider implementations, and
+TPF-owned authorized external-service hosts. A Connector models typed admission, publication, external observation,
+or external effect; it is not a generic plugin or a second Pipeline language.
 
-The repository does not own runtime, deployment, Spring, plugins, compiler, framework-neutral contracts, Blocks, examples, expansions, documentation, or transport-completeness tests. Those remain in their respective repositories or in the monorepo conformance surface.
+## Boundary
 
-`pipelineframework.contracts.version`, `pipelineframework.compiler.version`, and `pipelineframework.runtime.version` identify external released snapshot dependencies. All projects are staging-only and must keep deployment skipped.
+- Consume semantic, compiler, and runtime seams as released artifacts. Do not copy their source or redefine their
+  validation rules here.
+- Keep Quarkus/Spring runtime implementation, foundational plugins, Blocks, Expansions, examples, applications, and
+  canonical documentation in their owning repositories.
+- Keep application bindings, credentials, endpoint policy, and Command authority with the application or host.
+- Imported capabilities must preserve pinned external contract identity and deterministic generated metadata.
+
+## Cross-repository changes
+
+Update canonical documentation or an ADR in `pipelineframework` when a change alters Connector meaning, authority,
+or a shared contract. Use the GitNexus `tpf` group for cross-repository impact and verify findings in the owning
+worktree. Do not introduce source fallbacks for another component release.
+
+## Build and publication
+
+Owner-local verification is the first gate. `TPF Candidate Build` and the trusted publisher create an immutable,
+commit-specific Connector candidate for the coordination repository; `tpf/system-tests` records downstream
+evidence on that exact source SHA. Use a compatibility set for coordinated repository changes, and require a green
+full train for formal BOM or release promotion. Keep the stable owner suite command in
+`.github/tpf-system-tests.json`.
+
+Always use the repository-local Maven cache:
+
+```sh
+./mvnw <goals> -Dmaven.repo.local="$PWD/.m2/repository"
+```
+
+Do not introduce Maven profiles except `central-publishing`. It may attach, sign, and deploy artifacts but must not
+select another source universe, module graph, or build topology.
+
+Do not commit, push, publish, or change another repository unless explicitly requested.
