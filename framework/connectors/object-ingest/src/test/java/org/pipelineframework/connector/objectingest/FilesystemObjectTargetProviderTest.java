@@ -129,6 +129,28 @@ class FilesystemObjectTargetProviderTest {
         }
     }
 
+    @Test
+    void rejectsPagedPartBeforePublishingWhenPageIndexIsInvalid() throws Exception {
+        FilesystemObjectTargetProvider provider = new FilesystemObjectTargetProvider(Runnable::run);
+        PipelineObjectPublishConfig target = target(tempDir);
+        ObjectWriteSession session = provider.open(new ObjectWriteOpenRequest(
+            target.name(), target, ".tpf-pages/run/group/page-invalid.part", "text/csv",
+            Map.of(
+                "tpf.page.index", "not-an-integer",
+                "tpf.page.group", "group",
+                "tpf.page.finalKey", "results/payments.csv"),
+            "page-invalid"))
+            .toCompletableFuture().join();
+        session.write(ByteBuffer.wrap("record\n".getBytes(StandardCharsets.UTF_8))).toCompletableFuture().join();
+
+        CompletionException failure = assertThrows(CompletionException.class, () -> session.close(
+            new ObjectWriteCloseRequest(7, "checksum", Map.of())).toCompletableFuture().join());
+
+        assertTrue(failure.getCause() instanceof IllegalArgumentException);
+        assertTrue(failure.getCause().getMessage().contains("tpf.page.index"));
+        assertFalse(Files.exists(tempDir.resolve(".tpf-pages/run/group/page-invalid.part")));
+    }
+
     private PipelineObjectPublishConfig target(Path root) {
         return new PipelineObjectPublishConfig(
             "results",

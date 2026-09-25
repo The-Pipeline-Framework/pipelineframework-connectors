@@ -11,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.charset.StandardCharsets;
+import java.nio.channels.FileChannel;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -137,12 +138,14 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
                 }
                 bytes += copyAndDigest(new java.io.ByteArrayInputStream(request.suffix()), output, digest);
             }
+            forceFile(temporary);
             try {
                 Files.move(temporary, finalPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (AtomicMoveNotSupportedException | FileAlreadyExistsException failure) {
                 Files.deleteIfExists(temporary);
                 throw new IllegalStateException("Configured filesystem does not support atomic paged composition", failure);
             }
+            forceDirectory(parent == null ? root : parent);
             String checksum = HexFormat.of().formatHex(digest.digest());
             Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
             metadata.put("target", request.targetName());
@@ -173,6 +176,18 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
             Files.deleteIfExists(path.orElseThrow());
         } catch (IOException cleanupFailure) {
             originalFailure.addSuppressed(cleanupFailure);
+        }
+    }
+
+    private static void forceFile(Path path) throws IOException {
+        try (FileChannel channel = FileChannel.open(path, java.nio.file.StandardOpenOption.WRITE)) {
+            channel.force(true);
+        }
+    }
+
+    private static void forceDirectory(Path path) throws IOException {
+        try (FileChannel channel = FileChannel.open(path, java.nio.file.StandardOpenOption.READ)) {
+            channel.force(true);
         }
     }
 
@@ -284,6 +299,7 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
                             output.close();
                             closed = true;
                         }
+                        forceFile(tempPath);
                         Map<String, String> metadata = metadata(closeRequest);
                         validatePagedMetadata(metadata);
                         moveAtomicallyReplacingExistingTarget();
@@ -325,15 +341,26 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
             if (!metadata.containsKey("tpf.page.index")) {
                 return;
             }
+            String pageIndex = requirePagedMetadata(metadata, "tpf.page.index");
+            try {
+                if (Integer.parseInt(pageIndex) < 0) {
+                    throw new IllegalArgumentException(
+                        "Paged filesystem part has negative metadata: tpf.page.index=" + pageIndex);
+                }
+            } catch (NumberFormatException failure) {
+                throw new IllegalArgumentException(
+                    "Paged filesystem part has invalid metadata: tpf.page.index=" + pageIndex, failure);
+            }
             requirePagedMetadata(metadata, "tpf.page.group");
             requirePagedMetadata(metadata, "tpf.page.finalKey");
         }
 
-        private static void requirePagedMetadata(Map<String, String> metadata, String key) {
+        private static String requirePagedMetadata(Map<String, String> metadata, String key) {
             String value = metadata.get(key);
             if (value == null || value.isBlank()) {
                 throw new IllegalArgumentException("Paged filesystem part is missing metadata: " + key);
             }
+            return value;
         }
 
         private void writePageManifestIfRequired(Map<String, String> metadata) throws IOException {
@@ -353,7 +380,9 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
                 try (OutputStream output = Files.newOutputStream(tempManifest)) {
                     values.store(output, "TPF paged object manifest");
                 }
+                forceFile(tempManifest);
                 Files.move(tempManifest, manifest, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                forceDirectory(manifest.getParent());
             } catch (IOException | RuntimeException failure) {
                 deleteWithSuppressedFailure(Optional.of(tempManifest), failure);
                 throw failure;
@@ -398,6 +427,7 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
         private void moveAtomicallyReplacingExistingTarget() throws IOException {
             try {
                 Files.move(tempPath, finalPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                forceDirectory(finalPath.getParent());
             } catch (AtomicMoveNotSupportedException | FileAlreadyExistsException e) {
                 throw new IllegalStateException(
                     "Configured filesystem does not support atomic replacement for " + finalPath, e);
