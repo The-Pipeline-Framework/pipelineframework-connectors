@@ -47,6 +47,7 @@ class FilesystemObjectTargetProviderTest {
         assertEquals("text/csv", result.reference().contentType());
         assertEquals("checksum", result.checksum());
         assertEquals("1", result.reference().metadata().get("recordCount"));
+        assertTrue(result.reference().metadata().containsKey("tpf.filesystem.locator.sha256"));
         assertTrue(Files.list(tempDir.resolve("results"))
             .noneMatch(path -> path.getFileName().toString().contains(".tpf-publish-")));
     }
@@ -104,6 +105,28 @@ class FilesystemObjectTargetProviderTest {
         assertEquals("header\nfirst,\"María\nGarcía\"\nsecond,Zoë\nfooter\n",
             Files.readString(tempDir.resolve("results/payments.csv")));
         assertEquals(Files.size(tempDir.resolve("results/payments.csv")), result.bytes());
+        assertTrue(result.reference().metadata().containsKey("tpf.filesystem.locator.sha256"));
+    }
+
+    @Test
+    void rejectsPagedPartBeforePublishingWhenRequiredMetadataIsMissing() throws Exception {
+        FilesystemObjectTargetProvider provider = new FilesystemObjectTargetProvider(Runnable::run);
+        PipelineObjectPublishConfig target = target(tempDir);
+        ObjectWriteSession session = provider.open(new ObjectWriteOpenRequest(
+            target.name(), target, ".tpf-pages/run/group/page-000.part", "text/csv",
+            Map.of("tpf.page.index", "0", "tpf.page.finalKey", "results/payments.csv"), "page-0"))
+            .toCompletableFuture().join();
+        session.write(ByteBuffer.wrap("record\n".getBytes(StandardCharsets.UTF_8))).toCompletableFuture().join();
+
+        CompletionException failure = assertThrows(CompletionException.class, () -> session.close(
+            new ObjectWriteCloseRequest(7, "checksum", Map.of())).toCompletableFuture().join());
+
+        assertTrue(failure.getCause() instanceof IllegalArgumentException);
+        assertTrue(failure.getCause().getMessage().contains("tpf.page.group"));
+        assertFalse(Files.exists(tempDir.resolve(".tpf-pages/run/group/page-000.part")));
+        try (var files = Files.walk(tempDir)) {
+            assertTrue(files.noneMatch(path -> path.getFileName().toString().contains(".tpf-publish-")));
+        }
     }
 
     private PipelineObjectPublishConfig target(Path root) {

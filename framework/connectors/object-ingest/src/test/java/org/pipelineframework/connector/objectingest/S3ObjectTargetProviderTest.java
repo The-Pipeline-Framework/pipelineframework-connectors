@@ -13,11 +13,11 @@ import static org.mockito.Mockito.when;
 
 import java.nio.ByteBuffer;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -48,7 +48,6 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
-import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 
 class S3ObjectTargetProviderTest {
 
@@ -230,6 +229,8 @@ class S3ObjectTargetProviderTest {
     @Test
     void streamComposesS3PagePartsWithFinalObjectParity() throws Exception {
         S3Client client = mock(S3Client.class);
+        when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+            .thenReturn(CreateMultipartUploadResponse.builder().uploadId("compose-upload").build());
         byte[] first = "first,\"María\nGarcía\"\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         byte[] second = "second,Zoë\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         when(client.headObject(any(HeadObjectRequest.class))).thenAnswer(invocation -> {
@@ -247,16 +248,16 @@ class S3ObjectTargetProviderTest {
                 return new ResponseInputStream<>(GetObjectResponse.builder().build(),
                     AbortableInputStream.create(new ByteArrayInputStream(bytes)));
             });
-        AtomicReference<byte[]> published = new AtomicReference<>();
-        when(client.putObject(any(PutObjectRequest.class), any(RequestBody.class))).thenAnswer(invocation -> {
+        ByteArrayOutputStream published = new ByteArrayOutputStream();
+        when(client.uploadPart(any(UploadPartRequest.class), any(RequestBody.class))).thenAnswer(invocation -> {
             RequestBody body = invocation.getArgument(1);
             try (var input = body.contentStreamProvider().newStream()) {
-                published.set(input.readAllBytes());
+                published.write(input.readAllBytes());
             }
-            return PutObjectResponse.builder().eTag("final-etag").build();
+            return UploadPartResponse.builder().eTag("compose-etag").build();
         });
         S3ObjectTargetProvider provider = new S3ObjectTargetProvider(client, Runnable::run, 5 * 1024 * 1024);
-        PipelineObjectPublishConfig target = openRequest().target();
+        PipelineObjectPublishConfig target = openRequest("eu-west-1").target();
 
         ObjectWriteResult result = provider.compose(new PagedObjectCompositionRequest(
             target.name(), target, "payments.csv", "text/csv", Map.of("recordCount", "2"),
@@ -265,9 +266,11 @@ class S3ObjectTargetProviderTest {
             "footer\n".getBytes(java.nio.charset.StandardCharsets.UTF_8))).toCompletableFuture().join();
 
         assertEquals("header\nfirst,\"María\nGarcía\"\nsecond,Zoë\nfooter\n",
-            new String(published.get(), java.nio.charset.StandardCharsets.UTF_8));
-        assertEquals(published.get().length, result.bytes());
-        assertEquals(sha256(published.get()), result.checksum());
+            published.toString(java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(published.size(), result.bytes());
+        assertEquals(sha256(published.toByteArray()), result.checksum());
+        assertEquals("eu-west-1", result.reference().metadata().get(S3ObjectSourceProvider.REGION_METADATA));
+        verify(client).completeMultipartUpload(any(CompleteMultipartUploadRequest.class));
     }
 
     private ObjectWriteOpenRequest openRequest() {

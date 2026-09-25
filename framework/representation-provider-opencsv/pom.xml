@@ -17,6 +17,11 @@
         </dependency>
         <dependency>
             <groupId>org.pipelineframework</groupId>
+            <artifactId>pipelineframework-runtime-core</artifactId>
+            <version>${pipelineframework.contracts.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.pipelineframework</groupId>
             <artifactId>pipelineframework</artifactId>
             <version>${pipelineframework.runtime.version}</version>
         </dependency>

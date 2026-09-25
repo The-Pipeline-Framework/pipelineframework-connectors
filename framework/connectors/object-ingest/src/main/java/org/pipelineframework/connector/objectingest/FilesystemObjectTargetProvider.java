@@ -108,14 +108,16 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
         Path root = root(request.targetName(), request.target());
         Path finalPath = requireUnderRoot(root, root.resolve(request.objectKey()).normalize());
         Path parent = finalPath.getParent();
+        Optional<Path> temp = Optional.empty();
         try {
             if (parent != null) {
                 Files.createDirectories(parent);
             }
-            Path temp = Files.createTempFile(parent == null ? root : parent, ".tpf-compose-", ".tmp");
+            temp = Optional.of(Files.createTempFile(parent == null ? root : parent, ".tpf-compose-", ".tmp"));
+            Path temporary = temp.orElseThrow();
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             long bytes = 0;
-            try (OutputStream output = new BufferedOutputStream(Files.newOutputStream(temp))) {
+            try (OutputStream output = new BufferedOutputStream(Files.newOutputStream(temporary))) {
                 bytes += copyAndDigest(new java.io.ByteArrayInputStream(request.prefix()), output, digest);
                 byte[] buffer = new byte[64 * 1024];
                 for (String partKey : request.orderedPartKeys()) {
@@ -136,20 +138,49 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
                 bytes += copyAndDigest(new java.io.ByteArrayInputStream(request.suffix()), output, digest);
             }
             try {
-                Files.move(temp, finalPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                Files.move(temporary, finalPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (AtomicMoveNotSupportedException | FileAlreadyExistsException failure) {
-                Files.deleteIfExists(temp);
+                Files.deleteIfExists(temporary);
                 throw new IllegalStateException("Configured filesystem does not support atomic paged composition", failure);
             }
             String checksum = HexFormat.of().formatHex(digest.digest());
             Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
             metadata.put("target", request.targetName());
+            Path canonicalRoot = root.toRealPath();
+            Path canonicalPath = finalPath.toRealPath();
+            metadata.put(
+                LOCATOR_DIGEST_METADATA,
+                sha256((canonicalRoot + "\n" + request.objectKey() + "\n" + canonicalPath)
+                    .getBytes(StandardCharsets.UTF_8)));
             PayloadReference reference = new PayloadReference(
-                "filesystem", root.toRealPath().toString(), request.objectKey(), request.contentType(),
+                "filesystem", canonicalRoot.toString(), request.objectKey(), request.contentType(),
                 "raw", checksum, bytes, null, metadata, Optional.empty());
             return new ObjectWriteResult(reference, bytes, checksum, Instant.now());
-        } catch (IOException | NoSuchAlgorithmException failure) {
+        } catch (IOException | NoSuchAlgorithmException | RuntimeException failure) {
+            deleteWithSuppressedFailure(temp, failure);
+            if (failure instanceof RuntimeException runtimeFailure) {
+                throw runtimeFailure;
+            }
             throw new CompletionException(failure);
+        }
+    }
+
+    private static void deleteWithSuppressedFailure(Optional<Path> path, Throwable originalFailure) {
+        if (path.isEmpty()) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(path.orElseThrow());
+        } catch (IOException cleanupFailure) {
+            originalFailure.addSuppressed(cleanupFailure);
+        }
+    }
+
+    private static String sha256(byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (NoSuchAlgorithmException failure) {
+            throw new IllegalStateException("SHA-256 is unavailable", failure);
         }
     }
 
@@ -253,10 +284,10 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
                             output.close();
                             closed = true;
                         }
+                        Map<String, String> metadata = metadata(closeRequest);
+                        validatePagedMetadata(metadata);
                         moveAtomicallyReplacingExistingTarget();
-                        writePageManifestIfRequired(metadata(closeRequest));
-                        Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
-                        metadata.putAll(closeRequest.metadata());
+                        writePageManifestIfRequired(metadata);
                         metadata.put("target", request.targetName());
                         Path canonicalRoot = root.toRealPath();
                         Path canonicalPath = finalPath.toRealPath();
@@ -276,7 +307,7 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
                             metadata,
                             Optional.empty());
                         return new ObjectWriteResult(reference, closeRequest.bytes(), closeRequest.checksum(), Instant.now());
-                    } catch (IOException | IllegalStateException e) {
+                    } catch (IOException | RuntimeException e) {
                         cleanupTemporaryFile(e);
                         throw new CompletionException(e);
                     }
@@ -288,6 +319,21 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
             Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
             metadata.putAll(closeRequest.metadata());
             return metadata;
+        }
+
+        private static void validatePagedMetadata(Map<String, String> metadata) {
+            if (!metadata.containsKey("tpf.page.index")) {
+                return;
+            }
+            requirePagedMetadata(metadata, "tpf.page.group");
+            requirePagedMetadata(metadata, "tpf.page.finalKey");
+        }
+
+        private static void requirePagedMetadata(Map<String, String> metadata, String key) {
+            String value = metadata.get(key);
+            if (value == null || value.isBlank()) {
+                throw new IllegalArgumentException("Paged filesystem part is missing metadata: " + key);
+            }
         }
 
         private void writePageManifestIfRequired(Map<String, String> metadata) throws IOException {
@@ -303,10 +349,15 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
             metadata.forEach((key, value) -> values.setProperty("metadata." + key, value));
             Path manifest = finalPath.resolveSibling(finalPath.getFileName() + ".manifest");
             Path tempManifest = Files.createTempFile(manifest.getParent(), ".tpf-manifest-", ".tmp");
-            try (OutputStream output = Files.newOutputStream(tempManifest)) {
-                values.store(output, null);
+            try {
+                try (OutputStream output = Files.newOutputStream(tempManifest)) {
+                    values.store(output, "TPF paged object manifest");
+                }
+                Files.move(tempManifest, manifest, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException | RuntimeException failure) {
+                deleteWithSuppressedFailure(Optional.of(tempManifest), failure);
+                throw failure;
             }
-            Files.move(tempManifest, manifest, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         }
 
         @Override

@@ -176,18 +176,57 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
             HeadObjectRequest.builder().bucket(bucket).key(key).build()).contentLength()).sum();
         long totalBytes = Math.addExact(Math.addExact(request.prefix().length, partBytes), request.suffix().length);
         MessageDigest digest = S3WriteSession.sha256Digest();
+        CreateMultipartUploadResponse created = s3.createMultipartUpload(CreateMultipartUploadRequest.builder()
+            .bucket(bucket)
+            .key(finalKey)
+            .contentType(request.contentType())
+            .metadata(request.metadata())
+            .build());
+        List<CompletedPart> completedParts = new ArrayList<>();
         try (InputStream composite = new java.security.DigestInputStream(
             new S3PartSequenceInputStream(s3, bucket, request.prefix(), physicalParts, request.suffix()), digest)) {
-            s3.putObject(PutObjectRequest.builder()
-                    .bucket(bucket).key(finalKey).contentType(request.contentType()).metadata(request.metadata()).build(),
-                RequestBody.fromInputStream(composite, totalBytes));
-        } catch (IOException failure) {
+            int partNumber = 1;
+            byte[] block;
+            while ((block = composite.readNBytes(partSizeBytes)).length > 0) {
+                UploadPartResponse uploaded = s3.uploadPart(UploadPartRequest.builder()
+                        .bucket(bucket).key(finalKey).uploadId(created.uploadId()).partNumber(partNumber).build(),
+                    RequestBody.fromBytes(block));
+                completedParts.add(CompletedPart.builder()
+                    .partNumber(partNumber)
+                    .eTag(uploaded.eTag())
+                    .build());
+                partNumber++;
+            }
+            if (completedParts.isEmpty()) {
+                s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                    .bucket(bucket).key(finalKey).uploadId(created.uploadId()).build());
+                s3.putObject(PutObjectRequest.builder()
+                        .bucket(bucket).key(finalKey).contentType(request.contentType()).metadata(request.metadata()).build(),
+                    RequestBody.empty());
+            } else {
+                s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                    .bucket(bucket).key(finalKey).uploadId(created.uploadId())
+                    .multipartUpload(CompletedMultipartUpload.builder().parts(completedParts).build())
+                    .build());
+            }
+        } catch (IOException | RuntimeException failure) {
+            try {
+                s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                    .bucket(bucket).key(finalKey).uploadId(created.uploadId()).build());
+            } catch (RuntimeException abortFailure) {
+                failure.addSuppressed(abortFailure);
+            }
+            if (failure instanceof RuntimeException runtimeFailure) {
+                throw runtimeFailure;
+            }
             throw new java.util.concurrent.CompletionException(failure);
         }
         String checksum = HexFormat.of().formatHex(digest.digest());
         Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
         metadata.put("target", request.targetName());
         metadata.put(S3ObjectSourceProvider.CHECKSUM_KIND_METADATA, S3ObjectSourceProvider.CHECKSUM_KIND_SHA256);
+        location(request.target(), "region")
+            .ifPresent(region -> metadata.put(S3ObjectSourceProvider.REGION_METADATA, region));
         PayloadReference reference = new PayloadReference(
             "s3", bucket, finalKey, request.contentType(), "raw", checksum, totalBytes,
             null, metadata, Optional.empty());
