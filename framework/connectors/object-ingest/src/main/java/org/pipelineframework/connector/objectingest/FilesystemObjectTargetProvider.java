@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.charset.StandardCharsets;
 import java.nio.channels.FileChannel;
+import java.nio.file.attribute.PosixFileAttributeView;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -186,8 +187,13 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
     }
 
     private static void forceDirectory(Path path) throws IOException {
+        if (!Files.getFileStore(path).supportsFileAttributeView(PosixFileAttributeView.class)) {
+            return;
+        }
         try (FileChannel channel = FileChannel.open(path, java.nio.file.StandardOpenOption.READ)) {
             channel.force(true);
+        } catch (UnsupportedOperationException unsupported) {
+            // Directory forcing has no portable Java operation; the completed atomic move remains authoritative.
         }
     }
 
