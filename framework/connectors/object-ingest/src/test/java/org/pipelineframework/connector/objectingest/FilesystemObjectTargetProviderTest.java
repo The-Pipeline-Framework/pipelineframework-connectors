@@ -19,6 +19,8 @@ import org.pipelineframework.objectpublish.ObjectWriteCloseRequest;
 import org.pipelineframework.objectpublish.ObjectWriteOpenRequest;
 import org.pipelineframework.objectpublish.ObjectWriteResult;
 import org.pipelineframework.objectpublish.ObjectWriteSession;
+import org.pipelineframework.objectpublish.PagedObjectCompositionRequest;
+import org.pipelineframework.objectpublish.PagedObjectPartQuery;
 
 class FilesystemObjectTargetProviderTest {
 
@@ -45,6 +47,7 @@ class FilesystemObjectTargetProviderTest {
         assertEquals("text/csv", result.reference().contentType());
         assertEquals("checksum", result.checksum());
         assertEquals("1", result.reference().metadata().get("recordCount"));
+        assertTrue(result.reference().metadata().containsKey("tpf.filesystem.locator.sha256"));
         assertTrue(Files.list(tempDir.resolve("results"))
             .noneMatch(path -> path.getFileName().toString().contains(".tpf-publish-")));
     }
@@ -83,6 +86,71 @@ class FilesystemObjectTargetProviderTest {
         assertTrue(exception.getCause() instanceof SecurityException);
     }
 
+    @Test
+    void composesCommittedPagePartsInOrderWithOnePrefixAndSuffix() throws Exception {
+        FilesystemObjectTargetProvider provider = new FilesystemObjectTargetProvider(Runnable::run);
+        PipelineObjectPublishConfig target = target(tempDir);
+        writePagePart(provider, target, ".tpf-pages/run/group/page-000.part", 0, "first,\"María\nGarcía\"\n");
+        writePagePart(provider, target, ".tpf-pages/run/group/page-001.part", 1, "second,Zoë\n");
+
+        var parts = provider.listParts(new PagedObjectPartQuery(
+            target.name(), target, ".tpf-pages/run/")).toCompletableFuture().join();
+        ObjectWriteResult result = provider.compose(new PagedObjectCompositionRequest(
+            target.name(), target, "results/payments.csv", "text/csv", Map.of("recordCount", "2"),
+            "compose-run", "header\n".getBytes(StandardCharsets.UTF_8),
+            parts.stream().map(part -> part.objectKey()).toList(),
+            "footer\n".getBytes(StandardCharsets.UTF_8))).toCompletableFuture().join();
+
+        assertEquals(2, parts.size());
+        assertEquals("header\nfirst,\"María\nGarcía\"\nsecond,Zoë\nfooter\n",
+            Files.readString(tempDir.resolve("results/payments.csv")));
+        assertEquals(Files.size(tempDir.resolve("results/payments.csv")), result.bytes());
+        assertTrue(result.reference().metadata().containsKey("tpf.filesystem.locator.sha256"));
+    }
+
+    @Test
+    void rejectsPagedPartBeforePublishingWhenRequiredMetadataIsMissing() throws Exception {
+        FilesystemObjectTargetProvider provider = new FilesystemObjectTargetProvider(Runnable::run);
+        PipelineObjectPublishConfig target = target(tempDir);
+        ObjectWriteSession session = provider.open(new ObjectWriteOpenRequest(
+            target.name(), target, ".tpf-pages/run/group/page-000.part", "text/csv",
+            Map.of("tpf.page.index", "0", "tpf.page.finalKey", "results/payments.csv"), "page-0"))
+            .toCompletableFuture().join();
+        session.write(ByteBuffer.wrap("record\n".getBytes(StandardCharsets.UTF_8))).toCompletableFuture().join();
+
+        CompletionException failure = assertThrows(CompletionException.class, () -> session.close(
+            new ObjectWriteCloseRequest(7, "checksum", Map.of())).toCompletableFuture().join());
+
+        assertTrue(failure.getCause() instanceof IllegalArgumentException);
+        assertTrue(failure.getCause().getMessage().contains("tpf.page.group"));
+        assertFalse(Files.exists(tempDir.resolve(".tpf-pages/run/group/page-000.part")));
+        try (var files = Files.walk(tempDir)) {
+            assertTrue(files.noneMatch(path -> path.getFileName().toString().contains(".tpf-publish-")));
+        }
+    }
+
+    @Test
+    void rejectsPagedPartBeforePublishingWhenPageIndexIsInvalid() throws Exception {
+        FilesystemObjectTargetProvider provider = new FilesystemObjectTargetProvider(Runnable::run);
+        PipelineObjectPublishConfig target = target(tempDir);
+        ObjectWriteSession session = provider.open(new ObjectWriteOpenRequest(
+            target.name(), target, ".tpf-pages/run/group/page-invalid.part", "text/csv",
+            Map.of(
+                "tpf.page.index", "not-an-integer",
+                "tpf.page.group", "group",
+                "tpf.page.finalKey", "results/payments.csv"),
+            "page-invalid"))
+            .toCompletableFuture().join();
+        session.write(ByteBuffer.wrap("record\n".getBytes(StandardCharsets.UTF_8))).toCompletableFuture().join();
+
+        CompletionException failure = assertThrows(CompletionException.class, () -> session.close(
+            new ObjectWriteCloseRequest(7, "checksum", Map.of())).toCompletableFuture().join());
+
+        assertTrue(failure.getCause() instanceof IllegalArgumentException);
+        assertTrue(failure.getCause().getMessage().contains("tpf.page.index"));
+        assertFalse(Files.exists(tempDir.resolve(".tpf-pages/run/group/page-invalid.part")));
+    }
+
     private PipelineObjectPublishConfig target(Path root) {
         return new PipelineObjectPublishConfig(
             "results",
@@ -108,5 +176,27 @@ class FilesystemObjectTargetProviderTest {
             .toCompletableFuture().join();
         session.write(ByteBuffer.wrap(payload.getBytes(StandardCharsets.UTF_8))).toCompletableFuture().join();
         session.close(new ObjectWriteCloseRequest(payload.length(), "checksum", Map.of())).toCompletableFuture().join();
+    }
+
+    private void writePagePart(
+        FilesystemObjectTargetProvider provider,
+        PipelineObjectPublishConfig target,
+        String key,
+        int pageIndex,
+        String payload) {
+        Map<String, String> metadata = Map.of(
+            "tpf.page.index", String.valueOf(pageIndex),
+            "tpf.page.group", "payments",
+            "tpf.page.finalKey", "results/payments.csv",
+            "tpf.page.contentType", "text/csv",
+            "tpf.page.partKey", key,
+            "recordCount", "1");
+        ObjectWriteSession session = provider.open(new ObjectWriteOpenRequest(
+            target.name(), target, key, "text/csv", metadata, "page-" + pageIndex))
+            .toCompletableFuture().join();
+        byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
+        session.write(ByteBuffer.wrap(bytes)).toCompletableFuture().join();
+        session.close(new ObjectWriteCloseRequest(bytes.length, "checksum-" + pageIndex, metadata))
+            .toCompletableFuture().join();
     }
 }

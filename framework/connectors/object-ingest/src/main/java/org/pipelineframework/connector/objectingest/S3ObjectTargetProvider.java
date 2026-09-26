@@ -1,6 +1,9 @@
 package org.pipelineframework.connector.objectingest;
 
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.IOException;
+import java.io.ByteArrayInputStream;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -22,6 +25,10 @@ import java.util.concurrent.Executors;
 
 import org.pipelineframework.config.boundary.PipelineObjectPublishConfig;
 import org.pipelineframework.objectpublish.ObjectTargetProvider;
+import org.pipelineframework.objectpublish.PagedObjectTargetProvider;
+import org.pipelineframework.objectpublish.PagedObjectPart;
+import org.pipelineframework.objectpublish.PagedObjectPartQuery;
+import org.pipelineframework.objectpublish.PagedObjectCompositionRequest;
 import org.pipelineframework.objectpublish.ObjectWriteCloseRequest;
 import org.pipelineframework.objectpublish.ObjectWriteOpenRequest;
 import org.pipelineframework.objectpublish.ObjectWriteResult;
@@ -29,6 +36,7 @@ import org.pipelineframework.objectpublish.ObjectWriteSession;
 import org.pipelineframework.repository.PayloadReference;
 
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.core.sync.ResponseTransformer;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -43,11 +51,15 @@ import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 import software.amazon.awssdk.services.s3.model.UploadPartResponse;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 
 /**
  * Plain AWS SDK S3 object target provider for Object Publish.
  */
-public class S3ObjectTargetProvider implements ObjectTargetProvider, AutoCloseable {
+public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCloseable {
     static final int DEFAULT_PART_SIZE_BYTES = 8 * 1024 * 1024;
     private static final int MIN_PART_SIZE_BYTES = 5 * 1024 * 1024;
 
@@ -106,6 +118,177 @@ public class S3ObjectTargetProvider implements ObjectTargetProvider, AutoCloseab
                 .build());
             return new S3WriteSession(request, s3, bucket, key, response.uploadId(), executor, partSizeBytes);
         }, executor);
+    }
+
+    @Override
+    public CompletionStage<List<PagedObjectPart>> listParts(PagedObjectPartQuery query) {
+        return CompletableFuture.supplyAsync(() -> {
+            ObjectWriteOpenRequest lookup = new ObjectWriteOpenRequest(
+                query.targetName(), query.target(), query.stagePrefix(),
+                "application/octet-stream", Map.of(), "paged-list:" + query.stagePrefix());
+            S3Client s3 = client(lookup);
+            String bucket = required(lookup, "bucket");
+            String prefix = objectKey(lookup);
+            List<PagedObjectPart> parts = new ArrayList<>();
+            String continuation = null;
+            do {
+                ListObjectsV2Response listed = s3.listObjectsV2(ListObjectsV2Request.builder()
+                    .bucket(bucket).prefix(prefix).continuationToken(continuation).build());
+                listed.contents().stream()
+                    .filter(object -> object.key().endsWith(".part"))
+                    .forEach(object -> {
+                        Map<String, String> metadata = s3.headObject(HeadObjectRequest.builder()
+                            .bucket(bucket).key(object.key()).build()).metadata();
+                        parts.add(new PagedObjectPart(
+                            requiredMetadata(metadata, "tpf.page.partkey"),
+                            requiredMetadata(metadata, "tpf.page.group"),
+                            requiredMetadata(metadata, "tpf.page.finalkey"),
+                            requiredMetadata(metadata, "tpf.page.contenttype"),
+                            Integer.parseInt(requiredMetadata(metadata, "tpf.page.index")),
+                            metadata));
+                    });
+                continuation = listed.isTruncated() ? listed.nextContinuationToken() : null;
+            } while (continuation != null);
+            return parts.stream()
+                .sorted(java.util.Comparator.comparing(PagedObjectPart::groupKey)
+                    .thenComparingInt(PagedObjectPart::pageIndex))
+                .toList();
+        }, executor);
+    }
+
+    @Override
+    public CompletionStage<ObjectWriteResult> compose(PagedObjectCompositionRequest request) {
+        return CompletableFuture.supplyAsync(() -> composeBlocking(request), executor);
+    }
+
+    private ObjectWriteResult composeBlocking(PagedObjectCompositionRequest request) {
+        ObjectWriteOpenRequest targetRequest = new ObjectWriteOpenRequest(
+            request.targetName(), request.target(), request.objectKey(), request.contentType(),
+            request.metadata(), request.idempotencyKey());
+        S3Client s3 = client(targetRequest);
+        String bucket = required(targetRequest, "bucket");
+        String finalKey = objectKey(targetRequest);
+        List<String> physicalParts = request.orderedPartKeys().stream()
+            .map(key -> objectKey(new ObjectWriteOpenRequest(
+                request.targetName(), request.target(), key, request.contentType(), Map.of(), request.idempotencyKey())))
+            .toList();
+        long partBytes = physicalParts.stream().mapToLong(key -> s3.headObject(
+            HeadObjectRequest.builder().bucket(bucket).key(key).build()).contentLength()).sum();
+        long totalBytes = Math.addExact(Math.addExact(request.prefix().length, partBytes), request.suffix().length);
+        MessageDigest digest = S3WriteSession.sha256Digest();
+        CreateMultipartUploadResponse created = s3.createMultipartUpload(CreateMultipartUploadRequest.builder()
+            .bucket(bucket)
+            .key(finalKey)
+            .contentType(request.contentType())
+            .metadata(request.metadata())
+            .build());
+        List<CompletedPart> completedParts = new ArrayList<>();
+        try (InputStream composite = new java.security.DigestInputStream(
+            new S3PartSequenceInputStream(s3, bucket, request.prefix(), physicalParts, request.suffix()), digest)) {
+            int partNumber = 1;
+            byte[] block;
+            while ((block = composite.readNBytes(partSizeBytes)).length > 0) {
+                UploadPartResponse uploaded = s3.uploadPart(UploadPartRequest.builder()
+                        .bucket(bucket).key(finalKey).uploadId(created.uploadId()).partNumber(partNumber).build(),
+                    RequestBody.fromBytes(block));
+                completedParts.add(CompletedPart.builder()
+                    .partNumber(partNumber)
+                    .eTag(uploaded.eTag())
+                    .build());
+                partNumber++;
+            }
+            if (completedParts.isEmpty()) {
+                s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                    .bucket(bucket).key(finalKey).uploadId(created.uploadId()).build());
+                s3.putObject(PutObjectRequest.builder()
+                        .bucket(bucket).key(finalKey).contentType(request.contentType()).metadata(request.metadata()).build(),
+                    RequestBody.empty());
+            } else {
+                s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                    .bucket(bucket).key(finalKey).uploadId(created.uploadId())
+                    .multipartUpload(CompletedMultipartUpload.builder().parts(completedParts).build())
+                    .build());
+            }
+        } catch (IOException | RuntimeException failure) {
+            try {
+                s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                    .bucket(bucket).key(finalKey).uploadId(created.uploadId()).build());
+            } catch (RuntimeException abortFailure) {
+                failure.addSuppressed(abortFailure);
+            }
+            if (failure instanceof RuntimeException runtimeFailure) {
+                throw runtimeFailure;
+            }
+            throw new java.util.concurrent.CompletionException(failure);
+        }
+        String checksum = HexFormat.of().formatHex(digest.digest());
+        Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
+        metadata.put("target", request.targetName());
+        metadata.put(S3ObjectSourceProvider.CHECKSUM_KIND_METADATA, S3ObjectSourceProvider.CHECKSUM_KIND_SHA256);
+        location(request.target(), "region")
+            .ifPresent(region -> metadata.put(S3ObjectSourceProvider.REGION_METADATA, region));
+        PayloadReference reference = new PayloadReference(
+            "s3", bucket, finalKey, request.contentType(), "raw", checksum, totalBytes,
+            null, metadata, Optional.empty());
+        return new ObjectWriteResult(reference, totalBytes, checksum, Instant.now());
+    }
+
+    private static String requiredMetadata(Map<String, String> metadata, String key) {
+        String value = metadata.get(key);
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException("Paged S3 part is missing metadata: " + key);
+        }
+        return value;
+    }
+
+    private static final class S3PartSequenceInputStream extends InputStream {
+        private final S3Client client;
+        private final String bucket;
+        private final byte[] suffix;
+        private final java.util.Iterator<String> parts;
+        private Optional<InputStream> current;
+        private boolean suffixOpened;
+
+        private S3PartSequenceInputStream(
+            S3Client client, String bucket, byte[] prefix, List<String> parts, byte[] suffix) {
+            this.client = client;
+            this.bucket = bucket;
+            this.current = Optional.of(new ByteArrayInputStream(prefix));
+            this.parts = parts.iterator();
+            this.suffix = suffix;
+        }
+
+        @Override public int read() throws IOException {
+            byte[] one = new byte[1];
+            return read(one, 0, 1) < 0 ? -1 : one[0] & 0xff;
+        }
+
+        @Override public int read(byte[] bytes, int offset, int length) throws IOException {
+            while (current.isPresent()) {
+                int read = current.orElseThrow().read(bytes, offset, length);
+                if (read >= 0) return read;
+                current.orElseThrow().close();
+                current = nextStream();
+            }
+            return -1;
+        }
+
+        private Optional<InputStream> nextStream() {
+            if (parts.hasNext()) {
+                return Optional.of(client.getObject(
+                    GetObjectRequest.builder().bucket(bucket).key(parts.next()).build(),
+                    ResponseTransformer.toInputStream()));
+            }
+            if (!suffixOpened) {
+                suffixOpened = true;
+                return Optional.of(new ByteArrayInputStream(suffix));
+            }
+            return Optional.empty();
+        }
+
+        @Override public void close() throws IOException {
+            if (current.isPresent()) current.orElseThrow().close();
+        }
     }
 
     @Override

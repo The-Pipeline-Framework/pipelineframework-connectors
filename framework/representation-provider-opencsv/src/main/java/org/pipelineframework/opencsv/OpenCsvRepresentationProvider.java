@@ -25,6 +25,7 @@ import org.pipelineframework.representation.spi.ResolvedRepresentation;
 public final class OpenCsvRepresentationProvider implements RepresentationProvider {
     public static final String KEY = "opencsv";
     private static final String BOUNDARY = OpenCsvInputBoundary.class.getName();
+    private static final String PAGED_BOUNDARY = PagedOpenCsvInputBoundary.class.getName();
 
     @Override
     public ProviderMetadata metadata() {
@@ -57,7 +58,8 @@ public final class OpenCsvRepresentationProvider implements RepresentationProvid
 
     @Override
     public Optional<BoundaryClaim> claim(BoundaryRequest boundary) {
-        if (!boundary.declaredBoundaryContracts().contains(BOUNDARY)) {
+        if (!boundary.declaredBoundaryContracts().contains(BOUNDARY)
+            && !boundary.declaredBoundaryContracts().contains(PAGED_BOUNDARY)) {
             return Optional.empty();
         }
         String facade = boundary.serviceTypeName() + "PipelineFacade";
@@ -101,7 +103,8 @@ public final class OpenCsvRepresentationProvider implements RepresentationProvid
 
             @jakarta.enterprise.context.ApplicationScoped
             @org.pipelineframework.annotation.PipelineStep
-            public final class %s implements org.pipelineframework.service.blocking.BlockingIteratorService<%s, %s> {
+            public final class %s implements org.pipelineframework.service.blocking.BlockingIteratorService<%s, %s>,
+                    org.pipelineframework.paging.PagedSourceOperation<%s, %s> {
                 @jakarta.inject.Inject
                 %s delegate;
 
@@ -111,6 +114,21 @@ public final class OpenCsvRepresentationProvider implements RepresentationProvid
                 @Override
                 public org.pipelineframework.blocking.CloseableIterator<%s> iterateBlocking(%s input) {
                     return new MappingIterator(delegate.iterateBlocking(input), mapper);
+                }
+
+                @Override
+                @SuppressWarnings("unchecked")
+                public org.pipelineframework.paging.PagedSourceStream<%s> openPage(
+                        org.pipelineframework.paging.PagedSourceRequest<%s> request) {
+                    if (!(delegate instanceof org.pipelineframework.paging.PagedSourceOperation<?, ?> paged)) {
+                        throw new IllegalStateException("OpenCSV paging requires PagedOpenCsvInputBoundary");
+                    }
+                    var opened = ((org.pipelineframework.paging.PagedSourceOperation<%s, %s>) paged)
+                        .openPage(request);
+                    return new org.pipelineframework.paging.PagedSourceStream<>(
+                        org.pipelineframework.paging.PagedSourcePublishers.map(
+                            opened.items(), mapper::fromExternal),
+                        opened.completion());
                 }
 
                 private static final class MappingIterator implements org.pipelineframework.blocking.CloseableIterator<%s> {
@@ -129,7 +147,9 @@ public final class OpenCsvRepresentationProvider implements RepresentationProvid
                 }
             }
             """.formatted(packageName, simpleName, canonicalInput, canonicalOutput,
+                canonicalInput, canonicalOutput,
                 request.boundary().serviceTypeName(), mapper, canonicalOutput, canonicalInput,
+                canonicalOutput, canonicalInput, canonicalInput, external,
                 canonicalOutput, external, canonicalOutput, external, external, canonicalOutput, external,
                 canonicalOutput);
     }
