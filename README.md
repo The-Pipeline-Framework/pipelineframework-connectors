@@ -13,8 +13,14 @@ implementations, reusable Block composition, or application credentials and Comm
 Build with an isolated Maven repository:
 
 ```sh
-./mvnw clean verify -Dmaven.repo.local="$PWD/.m2/repository"
+./mvnw clean verify -DskipITs -Dmaven.repo.local="$PWD/.m2/repository"
 ```
+
+Pull-request CI runs compilation, unit tests, and publication-contract verification. It deliberately defers the
+Failsafe `*IT` suites for the Hibernate Reactive query connector, pgvector connector, and OIDC host connection:
+these are the slower external-service integration lane. A maintainer can run that lane from the Actions `Verify`
+workflow by selecting `Run external-service integration tests`; the opt-in run executes the full reactor
+verification, including those integration tests.
 
 Use the `central-publishing` profile only to sign and deploy the canonical reactor. For authoring guidance, see
 [Connectors](https://pipelineframework.org/develop/connectors/); for the component boundary, see
