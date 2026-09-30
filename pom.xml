@@ -19,7 +19,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.pipelineframework</groupId>
     <artifactId>pipelineframework-connectors-parent</artifactId>
-    <version>26.9.4</version>
+    <version>26.10.1-SNAPSHOT</version>
     <packaging>pom</packaging>
     <name>The Pipeline Framework Connectors</name>
     <description>Standalone TPF connectors, representation providers, import tooling, and host integrations</description>
