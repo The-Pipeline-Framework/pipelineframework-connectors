@@ -115,6 +115,7 @@
                         <groupId>org.sonatype.central</groupId><artifactId>central-publishing-maven-plugin</artifactId><version>0.9.0</version><extensions>true</extensions>
                         <configuration>
                             <publishingServerId>central</publishingServerId>
+                            <checksums>required</checksums>
                             <excludeArtifacts>
                                 <excludeArtifact>framework-connectors</excludeArtifact>
                                 <excludeArtifact>host-gmail</excludeArtifact><excludeArtifact>host-microsoft-graph</excludeArtifact><excludeArtifact>host-oidc-quarkus</excludeArtifact><excludeArtifact>host-quickbooks-mcp</excludeArtifact>
