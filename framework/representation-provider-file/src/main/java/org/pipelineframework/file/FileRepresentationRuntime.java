@@ -434,7 +434,12 @@ public final class FileRepresentationRuntime {
             synchronized (this) {
                 resolved = config;
                 if (resolved == null) {
-                    Path path = new PipelineYamlConfigLocator().locate(Path.of("").toAbsolutePath())
+                    Optional<String> explicit = Optional.ofNullable(System.getProperty("pipeline.config"))
+                        .filter(value -> !value.isBlank())
+                        .or(() -> Optional.ofNullable(System.getenv("PIPELINE_CONFIG"))
+                            .filter(value -> !value.isBlank()));
+                    Path path = explicit.map(value -> Path.of(value.trim()).toAbsolutePath().normalize())
+                        .or(() -> new PipelineYamlConfigLocator().locate(Path.of("").toAbsolutePath()))
                         .orElseThrow(() -> new IllegalStateException("pipeline configuration is required for file publication"));
                     resolved = new PipelineYamlConfigLoader().load(path);
                     config = resolved;
