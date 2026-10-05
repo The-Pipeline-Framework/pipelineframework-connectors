@@ -3,7 +3,6 @@
     <modelVersion>4.0.0</modelVersion>
     <parent><groupId>org.pipelineframework</groupId><artifactId>pipelineframework-connectors-parent</artifactId><version>26.10.1-SNAPSHOT</version><relativePath>../../pom.xml</relativePath></parent>
     <artifactId>host-quickbooks-mcp</artifactId>
-    <properties><maven.deploy.skip>true</maven.deploy.skip></properties>
     <name>The Pipeline Framework - Optional QuickBooks MCP Host</name>
     <description>Local-development STDIO client lifecycle for Node-owned Intuit authorization.</description>
     <dependencies>
