@@ -8,9 +8,6 @@
         <relativePath>../../pom.xml</relativePath>
     </parent>
     <artifactId>representation-provider-file</artifactId>
-    <properties>
-        <maven.deploy.skip>true</maven.deploy.skip>
-    </properties>
     <name>TPF File Representation Provider</name>
     <dependencies>
         <dependency>
