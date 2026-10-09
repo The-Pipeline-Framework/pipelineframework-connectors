@@ -22,7 +22,19 @@ def verify(root):
             raise ValueError(f"Unexpected integration suite in {report}")
         counts = {key: int(suite.attrib[key]) for key in
                   ("tests", "failures", "errors", "skipped")}
-        if counts["tests"] < 1 or any(counts[key] != 0 for key in
+        cases = suite.findall("testcase")
+        observed = {
+            "tests": len(cases),
+            "failures": sum(case.find("failure") is not None for case in cases),
+            "errors": sum(case.find("error") is not None for case in cases),
+            "skipped": sum(case.find("skipped") is not None for case in cases),
+        }
+        if counts != observed:
+            raise ValueError(f"Integration counters disagree with testcase evidence: {report}: "
+                             f"declared={counts}, observed={observed}")
+        passing = sum(all(case.find(outcome) is None for outcome in
+                          ("failure", "error", "skipped")) for case in cases)
+        if passing < 1 or any(counts[key] != 0 for key in
                                       ("failures", "errors", "skipped")):
             raise ValueError(f"Missing passing, unskipped integration coverage: {report}: {counts}")
         print(f"Service integration evidence: {name}: {counts['tests']} passed")

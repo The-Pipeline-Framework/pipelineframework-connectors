@@ -21,7 +21,8 @@ class IntegrationEvidenceTest(unittest.TestCase):
         for module, name in evidence.REQUIRED_SUITES.items():
             report = self.root / module / "target/failsafe-reports" / f"TEST-{name}.xml"
             report.parent.mkdir(parents=True)
-            report.write_text(f'<testsuite name="{name}" tests="2" failures="0" errors="0" skipped="0"/>')
+            report.write_text(f'<testsuite name="{name}" tests="2" failures="0" errors="0" skipped="0">'
+                              '<testcase name="first"/><testcase name="second"/></testsuite>')
             self.reports.append(report)
 
     def test_all_suites_pass(self):
@@ -49,6 +50,34 @@ class IntegrationEvidenceTest(unittest.TestCase):
             report.write_text(text)
             with self.assertRaises((ValueError, evidence.ET.ParseError)):
                 evidence.verify(self.root)
+
+    def test_declared_counts_require_matching_executed_cases(self):
+        report = self.reports[0]
+        original = report.read_text()
+        for cases in ('', '<testcase name="only"/>',
+                      '<testcase name="first"/><testcase name="second"/><testcase name="extra"/>',
+                      '<testcase name="first"><skipped/></testcase><testcase name="second"/>',
+                      '<testcase name="first"><failure/></testcase><testcase name="second"/>',
+                      '<testcase name="first"><error/></testcase><testcase name="second"/>'):
+            with self.subTest(cases=cases):
+                report.write_text(original.replace('<testcase name="first"/><testcase name="second"/>', cases))
+                with self.assertRaisesRegex(ValueError, 'counters disagree'):
+                    evidence.verify(self.root)
+
+    def test_consistent_empty_or_nonpassing_reports_fail(self):
+        report = self.reports[0]
+        name = evidence.REQUIRED_SUITES[next(iter(evidence.REQUIRED_SUITES))]
+        for outcome, counter in (("skipped", "skipped"), ("failure", "failures"), ("error", "errors")):
+            with self.subTest(outcome=outcome):
+                counts = {"failures": 0, "errors": 0, "skipped": 0, counter: 1}
+                report.write_text(f'<testsuite name="{name}" tests="1" failures="{counts["failures"]}" '
+                                  f'errors="{counts["errors"]}" skipped="{counts["skipped"]}">'
+                                  f'<testcase name="only"><{outcome}/></testcase></testsuite>')
+                with self.assertRaisesRegex(ValueError, 'Missing passing'):
+                    evidence.verify(self.root)
+        report.write_text(f'<testsuite name="{name}" tests="0" failures="0" errors="0" skipped="0"/>')
+        with self.assertRaisesRegex(ValueError, 'Missing passing'):
+            evidence.verify(self.root)
 
     def test_owner_entrypoint_requires_evidence_after_clean_verify(self):
         scripts = self.root / "scripts"
