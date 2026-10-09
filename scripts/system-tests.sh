@@ -4,17 +4,9 @@ read -r -a maven_args <<< "${MAVEN_ARGS:-}" || true
 
 case "${1:-}" in
   verify)
-    ./mvnw -B "${maven_args[@]}" \
-      -Dmaven.deploy.skip=true -Dgpg.skip=true -Dtpf.flatten.skip=true verify
-    ;;
-  live-providers)
-    cat >&2 <<'MESSAGE'
-The connectors repository does not yet own a credentialed live-provider test lane.
-Module verification exercises deterministic connector tests only and must not be
-reported as live-provider coverage. Keep the coordinator full train disabled until
-an owner-repository live-provider workflow and trusted relay are available.
-MESSAGE
-    exit 2
+    ./mvnw -B ${maven_args[@]+"${maven_args[@]}"} \
+      -Dmaven.deploy.skip=true -Dgpg.skip=true -Dtpf.flatten.skip=true clean verify
+    python3 scripts/verify-service-integration-reports.py
     ;;
   candidate-version)
     event=${2:?usage: system-tests.sh candidate-version pull_request|push PR_NUMBER SHA}
@@ -40,5 +32,5 @@ PY
     if [[ "$mode" == pr ]]; then expected="${version}-pr.${number}.${sha:0:12}"; else expected="${version}-main.${sha:0:12}"; fi
     [[ "$actual" == "$expected" ]] || { echo "candidate version mismatch" >&2; exit 1; }
     ;;
-  *) echo "usage: system-tests.sh verify|live-providers|candidate-version pull_request|push PR_NUMBER SHA" >&2; exit 2 ;;
+  *) echo "usage: system-tests.sh verify|candidate-version pull_request|push PR_NUMBER SHA" >&2; exit 2 ;;
 esac

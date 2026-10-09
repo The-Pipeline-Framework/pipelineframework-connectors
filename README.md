@@ -22,6 +22,12 @@ these are the slower external-service integration lane. A maintainer can run tha
 workflow by selecting `Run external-service integration tests`; the opt-in run executes the full reactor
 verification, including those integration tests.
 
+The central `connectors-verify` suite runs `clean verify`, including these service integration tests,
+against the resolved exact artifact set. It also checks their Failsafe reports: missing, empty, skipped
+or failing suites cannot produce a green result. PostgreSQL/pgvector and the local OIDC fixture need
+Docker/local processes, not third-party account secrets. This is service integration coverage, not a
+claim of testing commercial providers against live accounts.
+
 Use the `central-publishing` profile only to sign and deploy the canonical reactor. For authoring guidance, see
 [Connectors](https://pipelineframework.org/develop/connectors/); for the component boundary, see
 [TPF Components and Repositories](https://github.com/The-Pipeline-Framework/pipelineframework/blob/main/docs/architecture/components-and-repositories.md).
