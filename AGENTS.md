@@ -34,6 +34,10 @@ Owner-local verification is the first gate. `.github/tpf-system-tests.json` owns
 commands. `TPF Candidate Build` and the trusted publisher create an immutable, commit-specific Connector candidate;
 `tpf/system-tests` records downstream evidence on that exact source SHA.
 
+The central `verify` entrypoint runs the full canonical reactor with Failsafe enabled and checks evidence for
+Hibernate Reactive, pgvector and OIDC restart integration suites. Do not replace it with the PR workflow's
+`-DskipITs` command or invent a credentialed live-provider requirement for these disposable/local-service tests.
+
 For an ordinary single-repository pull request, use the candidate publisher and singleton system-test path above.
 For a coordinated change, give every participating pull request the same head-branch name under the same GitHub
 owner. Candidate intake discovers those open component pull requests and dispatches one deterministic compatibility
