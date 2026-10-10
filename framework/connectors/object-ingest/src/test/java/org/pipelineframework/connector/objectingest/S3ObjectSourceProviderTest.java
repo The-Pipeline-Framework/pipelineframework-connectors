@@ -78,6 +78,22 @@ class S3ObjectSourceProviderTest {
     }
 
     @Test
+    void materializationRejectsForgedS3ReferenceBeforeContactingS3() {
+        S3Client client = mock(S3Client.class);
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        PayloadReference issued = authority.issue(reference("invoice.pdf", "abc123", 3L));
+        PayloadReference altered = new PayloadReference(issued.provider(), issued.container(), "private.pdf",
+            issued.contentType(), issued.codec(), issued.checksum(), issued.sizeBytes(), issued.version(),
+            issued.metadata(), issued.connectorOrigin());
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
+            assertThrows(CompletionException.class, () -> provider
+                .materialize(altered, 10L).toCompletableFuture().join());
+        }
+        verify(client, never()).headObject(any(software.amazon.awssdk.services.s3.model.HeadObjectRequest.class));
+        verify(client, never()).getObjectAsBytes(any(GetObjectRequest.class));
+    }
+
+    @Test
     void materializesBindingOwnedS3ReferenceWithBoundedStableContent() {
         S3Client client = mock(S3Client.class);
         AtomicInteger executorCalls = new AtomicInteger();
@@ -95,11 +111,12 @@ class S3ObjectSourceProviderTest {
                     .build(),
                 new byte[] {1, 2, 3}));
 
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
         MaterializedPayload materialized = new S3ObjectSourceProvider(client, command -> {
             executorCalls.incrementAndGet();
             command.run();
-        })
-            .materialize(reference("invoice.pdf", "abc123", 3L), 10L)
+        }, authority)
+            .materialize(authority.issue(reference("invoice.pdf", "abc123", 3L)), 10L)
             .toCompletableFuture()
             .join();
 
@@ -131,9 +148,11 @@ class S3ObjectSourceProviderTest {
                 .eTag("\"different\"")
                 .build());
 
-        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client)) {
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
             assertThrows(CompletionException.class, () -> provider
-                .materialize(reference("invoice.pdf", "abc123", 3L), 10L).toCompletableFuture().join());
+                .materialize(authority.issue(reference("invoice.pdf", "abc123", 3L)), 10L)
+                .toCompletableFuture().join());
         }
 
         verify(client, never()).getObjectAsBytes(any(GetObjectRequest.class));
@@ -152,9 +171,11 @@ class S3ObjectSourceProviderTest {
                 GetObjectResponse.builder().eTag("\"abc123\"").build(),
                 new byte[] {1, 2, 3, 4}));
 
-        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client)) {
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
             assertThrows(CompletionException.class, () -> provider
-                .materialize(reference("invoice.pdf", "abc123", 3L), 3L).toCompletableFuture().join());
+                .materialize(authority.issue(reference("invoice.pdf", "abc123", 3L)), 3L)
+                .toCompletableFuture().join());
         }
     }
 
@@ -187,8 +208,9 @@ class S3ObjectSourceProviderTest {
             Optional.empty());
 
         MaterializedPayload materialized;
-        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client)) {
-            materialized = provider.materialize(published, 100L).toCompletableFuture().join();
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
+            materialized = provider.materialize(authority.issue(published), 100L).toCompletableFuture().join();
         }
 
         assertArrayEquals(bytes, materialized.bytes());

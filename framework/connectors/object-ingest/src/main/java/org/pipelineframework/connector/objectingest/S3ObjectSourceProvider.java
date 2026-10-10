@@ -279,6 +279,7 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
 
     private MaterializedPayload materializeBlocking(PayloadReference reference, long maxBytes) {
         requireMaterializable(reference, maxBytes);
+        authority.verify(reference);
         S3Client resolvedClient = client(reference);
         HeadObjectRequest.Builder headRequest = HeadObjectRequest.builder()
             .bucket(reference.container())
