@@ -47,7 +47,7 @@ class FilesystemObjectTargetProviderTest {
         assertEquals("text/csv", result.reference().contentType());
         assertEquals("checksum", result.checksum());
         assertEquals("1", result.reference().metadata().get("recordCount"));
-        assertTrue(result.reference().metadata().containsKey("tpf.filesystem.locator.sha256"));
+        assertTrue(result.reference().metadata().containsKey(FilesystemReferenceAuthority.CAPABILITY_METADATA));
         assertTrue(Files.list(tempDir.resolve("results"))
             .noneMatch(path -> path.getFileName().toString().contains(".tpf-publish-")));
     }
@@ -105,7 +105,7 @@ class FilesystemObjectTargetProviderTest {
         assertEquals("header\nfirst,\"María\nGarcía\"\nsecond,Zoë\nfooter\n",
             Files.readString(tempDir.resolve("results/payments.csv")));
         assertEquals(Files.size(tempDir.resolve("results/payments.csv")), result.bytes());
-        assertTrue(result.reference().metadata().containsKey("tpf.filesystem.locator.sha256"));
+        assertTrue(result.reference().metadata().containsKey(FilesystemReferenceAuthority.CAPABILITY_METADATA));
     }
 
     @Test
