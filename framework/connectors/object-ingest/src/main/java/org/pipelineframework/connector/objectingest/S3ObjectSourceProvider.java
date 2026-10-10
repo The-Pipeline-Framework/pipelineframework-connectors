@@ -196,9 +196,9 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
                     CHECKSUM_KIND_SHA256.equalsIgnoreCase(checksumKind(reference)));
             } catch (RuntimeException failure) {
                 try {
-                    stream.close();
-                } catch (IOException closeFailure) {
-                    failure.addSuppressed(closeFailure);
+                    stream.abort();
+                } catch (RuntimeException abortFailure) {
+                    failure.addSuppressed(abortFailure);
                 }
                 throw failure;
             }

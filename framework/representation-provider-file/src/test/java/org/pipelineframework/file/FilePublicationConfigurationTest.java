@@ -21,6 +21,7 @@ import org.pipelineframework.connector.ConnectorBindingDefinition;
 import org.pipelineframework.connector.ConnectorBindingName;
 import org.pipelineframework.connector.ConnectorBindingRegistry;
 import org.pipelineframework.connector.ConnectorConfigurationDocument;
+import org.pipelineframework.connector.ConnectorProviderLease;
 import org.pipelineframework.connector.ConnectorRuntimeContext;
 import org.pipelineframework.connector.objectingest.FilesystemObjectConnector;
 import org.pipelineframework.connector.objectingest.FilesystemObjectSourceProvider;
@@ -150,12 +151,16 @@ class FilePublicationConfigurationTest {
             PipelineObjectSourceConfig source = new PipelineObjectSourceConfig(
                 "documents", "object", "filesystem", Optional.of("documents"), Map.of("root", inputRoot.toString()),
                 null, null, null, PipelineObjectPayloadConfig.reference());
-            FilesystemObjectSourceProvider provider = new FilesystemObjectSourceProvider();
-            var raw = provider.list(source, 10).getFirst().contentRef();
             FilesystemObjectConnector connector = new FilesystemObjectConnector();
+            // Issue the locator through the same provider authority that will consume it.
+            FilesystemObjectSourceProvider provider = connector.operations().stream()
+                .filter(FilesystemObjectSourceProvider.class::isInstance)
+                .map(FilesystemObjectSourceProvider.class::cast).findFirst().orElseThrow();
+            var raw = provider.list(source, 10).getFirst().contentRef();
             ConnectorBindingRegistry bindings = ConnectorBindingRegistry.fromProviders(
                 List.of(new ConnectorBindingDefinition(ConnectorBindingName.of("documents"), connector.id(), 1,
-                    new ConnectorConfigurationDocument(Map.of()))), List.of(connector));
+                    new ConnectorConfigurationDocument(Map.of()))), List.of(connector),
+                ignored -> ConnectorProviderLease.of(connector, () -> { }));
             try {
                 var owned = bindings.ownPayloadReference(ConnectorBindingName.of("documents"),
                     provider.id(), provider.majorVersion(), raw);
