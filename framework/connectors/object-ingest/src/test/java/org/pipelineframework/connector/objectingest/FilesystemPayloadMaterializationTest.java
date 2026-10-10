@@ -289,14 +289,13 @@ class FilesystemPayloadMaterializationTest {
     }
 
     @Test
-    void referenceFailsClosedAfterProviderRecreation() throws Exception {
+    void fallbackAuthoritySurvivesProviderRecreationWithinProcess() throws Exception {
         Files.writeString(tempDir.resolve("document.txt"), "content");
         PayloadReference issued = new FilesystemObjectSourceProvider().list(source(), 1).getFirst().contentRef();
 
-        CompletionException failure = assertThrows(CompletionException.class, () ->
-            new FilesystemObjectSourceProvider().materialize(issued, 1024).toCompletableFuture().join());
-
-        assertEquals("Filesystem payload locator provenance mismatch: document.txt", failure.getCause().getMessage());
+        byte[] bytes = new FilesystemObjectSourceProvider().materialize(issued, 1024)
+            .toCompletableFuture().join().bytes();
+        assertArrayEquals("content".getBytes(StandardCharsets.UTF_8), bytes);
     }
 
     @Test

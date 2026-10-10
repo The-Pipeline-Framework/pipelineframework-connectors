@@ -16,29 +16,46 @@ final class ObjectReferenceKey {
         if (encoded == null || encoded.isBlank()) {
             encoded = System.getenv("TPF_OBJECT_REFERENCE_HMAC_KEY");
         }
-        byte[] root;
+        SecretKeySpec rootKey;
         if (encoded == null || encoded.isBlank()) {
-            root = new byte[32];
-            new SecureRandom().nextBytes(root);
+            rootKey = FallbackRoot.KEY;
         } else {
+            byte[] root;
             try {
                 root = Base64.getDecoder().decode(encoded);
             } catch (IllegalArgumentException failure) {
                 throw new IllegalStateException("object reference HMAC key must be Base64", failure);
             }
-            if (root.length < 32) {
-                throw new IllegalStateException("object reference HMAC key must contain at least 32 bytes");
+            try {
+                if (root.length < 32) {
+                    throw new IllegalStateException("object reference HMAC key must contain at least 32 bytes");
+                }
+                rootKey = new SecretKeySpec(root, "HmacSHA256");
+            } finally {
+                java.util.Arrays.fill(root, (byte) 0);
             }
         }
         try {
             Mac derivation = Mac.getInstance("HmacSHA256");
-            derivation.init(new SecretKeySpec(root, "HmacSHA256"));
+            derivation.init(rootKey);
             return new SecretKeySpec(derivation.doFinal(
                 ("tpf.object-reference.v1:" + provider).getBytes(StandardCharsets.UTF_8)), "HmacSHA256");
         } catch (java.security.GeneralSecurityException failure) {
             throw new IllegalStateException("object reference HMAC key derivation unavailable", failure);
-        } finally {
-            java.util.Arrays.fill(root, (byte) 0);
+        }
+    }
+
+    private static final class FallbackRoot {
+        private static final SecretKeySpec KEY = create();
+
+        private static SecretKeySpec create() {
+            byte[] root = new byte[32];
+            new SecureRandom().nextBytes(root);
+            try {
+                return new SecretKeySpec(root, "HmacSHA256");
+            } finally {
+                java.util.Arrays.fill(root, (byte) 0);
+            }
         }
     }
 }
