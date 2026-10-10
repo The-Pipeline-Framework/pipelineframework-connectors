@@ -256,7 +256,17 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
         private final OutputStream output;
         private final Executor executor;
         private final FilesystemReferenceAuthority authority;
+        private final MessageDigest digest = sha256();
+        private long bytesWritten;
         private boolean closed;
+
+        private static MessageDigest sha256() {
+            try {
+                return MessageDigest.getInstance("SHA-256");
+            } catch (NoSuchAlgorithmException failure) {
+                throw new IllegalStateException("SHA-256 unavailable", failure);
+            }
+        }
 
         private FilesystemWriteSession(
             ObjectWriteOpenRequest request,
@@ -286,6 +296,8 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
                     }
                     try {
                         output.write(bytes);
+                        digest.update(bytes);
+                        bytesWritten += bytes.length;
                     } catch (IOException e) {
                         throw new CompletionException(e);
                     }
@@ -306,6 +318,12 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
                         forceFile(tempPath);
                         Map<String, String> metadata = metadata(closeRequest);
                         validatePagedMetadata(metadata);
+                        String checksum = HexFormat.of().formatHex(digest.digest());
+                        if (closeRequest.bytes() != bytesWritten
+                            || (closeRequest.checksum() != null
+                                && !closeRequest.checksum().equalsIgnoreCase(checksum))) {
+                            throw new IllegalArgumentException("filesystem write byte count or checksum mismatch");
+                        }
                         moveAtomicallyReplacingExistingTarget();
                         writePageManifestIfRequired(metadata);
                         metadata.put("target", request.targetName());
@@ -316,12 +334,12 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
                             request.objectKey(),
                             request.contentType(),
                             "raw",
-                            closeRequest.checksum(),
-                            closeRequest.bytes(),
+                            checksum,
+                            bytesWritten,
                             null,
                             metadata,
                             Optional.empty()));
-                        return new ObjectWriteResult(reference, closeRequest.bytes(), closeRequest.checksum(), Instant.now());
+                        return new ObjectWriteResult(reference, bytesWritten, checksum, Instant.now());
                     } catch (IOException | RuntimeException e) {
                         cleanupTemporaryFile(e);
                         throw new CompletionException(e);

@@ -9,6 +9,8 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.Map;
 import java.util.concurrent.CompletionException;
 
@@ -37,7 +39,7 @@ class FilesystemObjectTargetProviderTest {
         session.write(ByteBuffer.wrap("1,10\n".getBytes(StandardCharsets.UTF_8))).toCompletableFuture().join();
         ObjectWriteResult result = session.close(new ObjectWriteCloseRequest(
             "id,amount\n1,10\n".getBytes(StandardCharsets.UTF_8).length,
-            "checksum",
+            checksum("id,amount\n1,10\n"),
             Map.of("recordCount", "1"))).toCompletableFuture().join();
 
         assertEquals("id,amount\n1,10\n", Files.readString(tempDir.resolve("results/payments.csv")));
@@ -45,7 +47,8 @@ class FilesystemObjectTargetProviderTest {
         assertEquals(tempDir.toRealPath().toString(), result.reference().container());
         assertEquals("results/payments.csv", result.reference().key());
         assertEquals("text/csv", result.reference().contentType());
-        assertEquals("checksum", result.checksum());
+        assertEquals(checksum("id,amount\n1,10\n"), result.checksum());
+        assertEquals(result.checksum(), result.reference().checksum());
         assertEquals("1", result.reference().metadata().get("recordCount"));
         assertTrue(result.reference().metadata().containsKey(FilesystemReferenceAuthority.CAPABILITY_METADATA));
         assertTrue(Files.list(tempDir.resolve("results"))
@@ -64,6 +67,20 @@ class FilesystemObjectTargetProviderTest {
         assertFalse(Files.exists(tempDir.resolve("results/payments.csv")));
         assertTrue(Files.list(tempDir.resolve("results"))
             .noneMatch(path -> path.getFileName().toString().contains(".tpf-publish-")));
+    }
+
+    @Test
+    void rejectsIncorrectCloseMetadataBeforePublishing() throws Exception {
+        FilesystemObjectTargetProvider provider = new FilesystemObjectTargetProvider(Runnable::run);
+        ObjectWriteSession session = provider.open(openRequest(target(tempDir), "results/payments.csv"))
+            .toCompletableFuture().join();
+        session.write(ByteBuffer.wrap("data".getBytes(StandardCharsets.UTF_8))).toCompletableFuture().join();
+
+        CompletionException failure = assertThrows(CompletionException.class, () ->
+            session.close(new ObjectWriteCloseRequest(4, checksum("other"), Map.of()))
+                .toCompletableFuture().join());
+        assertTrue(failure.getCause() instanceof IllegalArgumentException);
+        assertFalse(Files.exists(tempDir.resolve("results/payments.csv")));
     }
 
     @Test
@@ -175,7 +192,8 @@ class FilesystemObjectTargetProviderTest {
         ObjectWriteSession session = provider.open(openRequest(target(tempDir), "results/payments.csv"))
             .toCompletableFuture().join();
         session.write(ByteBuffer.wrap(payload.getBytes(StandardCharsets.UTF_8))).toCompletableFuture().join();
-        session.close(new ObjectWriteCloseRequest(payload.length(), "checksum", Map.of())).toCompletableFuture().join();
+        session.close(new ObjectWriteCloseRequest(payload.getBytes(StandardCharsets.UTF_8).length,
+            checksum(payload), Map.of())).toCompletableFuture().join();
     }
 
     private void writePagePart(
@@ -196,7 +214,16 @@ class FilesystemObjectTargetProviderTest {
             .toCompletableFuture().join();
         byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
         session.write(ByteBuffer.wrap(bytes)).toCompletableFuture().join();
-        session.close(new ObjectWriteCloseRequest(bytes.length, "checksum-" + pageIndex, metadata))
+        session.close(new ObjectWriteCloseRequest(bytes.length, checksum(payload), metadata))
             .toCompletableFuture().join();
+    }
+
+    private static String checksum(String payload) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(payload.getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException failure) {
+            throw new IllegalStateException(failure);
+        }
     }
 }
