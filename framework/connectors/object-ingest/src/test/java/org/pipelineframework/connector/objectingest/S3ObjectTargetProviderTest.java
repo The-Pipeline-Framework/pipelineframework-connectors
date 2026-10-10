@@ -79,6 +79,7 @@ class S3ObjectTargetProviderTest {
         assertEquals("payments", result.reference().container());
         assertEquals("out/payments.csv", result.reference().key());
         assertEquals("1", result.reference().metadata().get("recordCount"));
+        assertTrue(result.reference().metadata().containsKey(S3ReferenceAuthority.CAPABILITY_METADATA));
         assertEquals(
             S3ObjectSourceProvider.CHECKSUM_KIND_SHA256,
             result.reference().metadata().get(S3ObjectSourceProvider.CHECKSUM_KIND_METADATA));

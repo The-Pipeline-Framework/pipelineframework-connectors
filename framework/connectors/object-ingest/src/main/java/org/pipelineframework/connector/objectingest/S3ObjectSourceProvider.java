@@ -1,5 +1,7 @@
 package org.pipelineframework.connector.objectingest;
 
+import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.FileSystems;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -20,11 +22,13 @@ import java.util.concurrent.Executors;
 
 import org.pipelineframework.config.boundary.PipelineObjectSourceConfig;
 import org.pipelineframework.connector.MaterializedPayload;
+import org.pipelineframework.connector.ObjectReadSession;
 import org.pipelineframework.objectingest.ObjectSourceItem;
 import org.pipelineframework.objectingest.ObjectSourceProvider;
 import org.pipelineframework.repository.PayloadReference;
 
 import software.amazon.awssdk.core.ResponseBytes;
+import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -46,6 +50,7 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
     static final String REGION_METADATA = "tpf.s3.region";
 
     private final Optional<S3Client> client;
+    private final S3ReferenceAuthority authority;
     private final boolean ownsClient;
     private final Executor executor;
     private final boolean ownsExecutor;
@@ -55,29 +60,42 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
     private CompletionStage<Void> stopStage;
 
     public S3ObjectSourceProvider() {
-        this(Optional.empty(), true, Executors.newVirtualThreadPerTaskExecutor(), true);
+        this(Optional.empty(), true, Executors.newVirtualThreadPerTaskExecutor(), true,
+            new S3ReferenceAuthority());
+    }
+
+    S3ObjectSourceProvider(S3ReferenceAuthority authority) {
+        this(Optional.empty(), true, Executors.newVirtualThreadPerTaskExecutor(), true, authority);
     }
 
     public S3ObjectSourceProvider(S3Client client) {
         this(Optional.of(Objects.requireNonNull(client, "client")), false,
-            Executors.newVirtualThreadPerTaskExecutor(), true);
+            Executors.newVirtualThreadPerTaskExecutor(), true, new S3ReferenceAuthority());
     }
 
     S3ObjectSourceProvider(S3Client client, Executor executor) {
-        this(Optional.of(Objects.requireNonNull(client, "client")), false, executor, false);
+        this(Optional.of(Objects.requireNonNull(client, "client")), false, executor, false,
+            new S3ReferenceAuthority());
+    }
+
+    S3ObjectSourceProvider(S3Client client, Executor executor, S3ReferenceAuthority authority) {
+        this(Optional.of(Objects.requireNonNull(client, "client")), false, executor, false, authority);
     }
 
     S3ObjectSourceProvider(S3Client client, Executor executor, boolean ownsExecutor) {
-        this(Optional.of(Objects.requireNonNull(client, "client")), false, executor, ownsExecutor);
+        this(Optional.of(Objects.requireNonNull(client, "client")), false, executor, ownsExecutor,
+            new S3ReferenceAuthority());
     }
 
     private S3ObjectSourceProvider(
         Optional<S3Client> client,
         boolean ownsClient,
         Executor executor,
-        boolean ownsExecutor
+        boolean ownsExecutor,
+        S3ReferenceAuthority authority
     ) {
         this.client = client;
+        this.authority = Objects.requireNonNull(authority, "S3 reference authority must not be null");
         this.ownsClient = ownsClient;
         this.executor = Objects.requireNonNull(executor, "S3 source executor must not be null");
         this.ownsExecutor = ownsExecutor;
@@ -146,8 +164,127 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
         return CompletableFuture.supplyAsync(() -> materializeBlocking(reference, maxBytes), executor);
     }
 
+    @Override
+    public CompletionStage<ObjectReadSession> openRead(PayloadReference reference) {
+        return CompletableFuture.supplyAsync(() -> {
+            requireMaterializable(reference, Long.MAX_VALUE);
+            authority.verify(reference);
+            S3Client resolved = client(reference);
+            HeadObjectRequest.Builder headRequest = HeadObjectRequest.builder()
+                .bucket(reference.container()).key(reference.key());
+            if (reference.version() != null) {
+                headRequest.versionId(reference.version());
+            }
+            var head = resolved.headObject(headRequest.build());
+            verifyEtag(reference, head.eTag());
+            if (head.contentLength() != null && head.contentLength() != reference.sizeBytes()) {
+                throw new IllegalStateException("S3 payload size mismatch: " + reference.key());
+            }
+            String currentEtag = normalizeEtag(head.eTag());
+            GetObjectRequest.Builder get = GetObjectRequest.builder()
+                .bucket(reference.container()).key(reference.key());
+            if (reference.version() != null) {
+                get.versionId(reference.version());
+            } else if (currentEtag != null) {
+                get.ifMatch(quoteEtag(currentEtag));
+            }
+            ResponseInputStream<GetObjectResponse> stream = resolved.getObject(get.build());
+            try {
+                verifyUnchangedDuringRead(reference.key(), currentEtag, stream.response().eTag());
+                verifyEtag(reference, stream.response().eTag());
+                return new S3ReadSession(stream, reference, executor,
+                    CHECKSUM_KIND_SHA256.equalsIgnoreCase(checksumKind(reference)));
+            } catch (RuntimeException failure) {
+                try {
+                    stream.abort();
+                } catch (RuntimeException abortFailure) {
+                    failure.addSuppressed(abortFailure);
+                }
+                throw failure;
+            }
+        }, executor);
+    }
+
+    private static final class S3ReadSession implements ObjectReadSession {
+        private final ResponseInputStream<GetObjectResponse> input;
+        private final PayloadReference reference;
+        private final Executor executor;
+        private final Optional<MessageDigest> digest;
+        private long delivered;
+        private volatile boolean closed;
+
+        private S3ReadSession(ResponseInputStream<GetObjectResponse> input, PayloadReference reference,
+                              Executor executor, boolean checksumIsSha256) {
+            this.input = input;
+            this.reference = reference;
+            this.executor = executor;
+            try {
+                this.digest = checksumIsSha256 ? Optional.of(MessageDigest.getInstance("SHA-256")) : Optional.empty();
+            } catch (NoSuchAlgorithmException failure) {
+                throw new IllegalStateException("SHA-256 is unavailable", failure);
+            }
+        }
+
+        @Override
+        public CompletionStage<Optional<ByteBuffer>> read(int maxBytes) {
+            if (maxBytes < 1 || maxBytes > 64 * 1024) {
+                throw new IllegalArgumentException("read size must be between 1 and 65536 bytes");
+            }
+            return CompletableFuture.supplyAsync(() -> {
+                synchronized (this) {
+                    if (closed) {
+                        throw new IllegalStateException("S3 read session is closed");
+                    }
+                    try {
+                        byte[] chunk = input.readNBytes(maxBytes);
+                        if (chunk.length == 0) {
+                            if (delivered != reference.sizeBytes()) {
+                                throw new IllegalStateException("S3 payload size mismatch: " + reference.key());
+                            }
+                            digest.ifPresent(value -> {
+                                String actual = HexFormat.of().formatHex(value.digest());
+                                if (reference.checksum() != null
+                                    && !reference.checksum().equalsIgnoreCase(actual)) {
+                                    throw new IllegalStateException("S3 payload checksum mismatch: " + reference.key());
+                                }
+                            });
+                            complete();
+                            return Optional.empty();
+                        }
+                        if (chunk.length > reference.sizeBytes() - delivered) {
+                            throw new IllegalStateException("S3 payload size mismatch: " + reference.key());
+                        }
+                        delivered += chunk.length;
+                        digest.ifPresent(value -> value.update(chunk));
+                        return Optional.of(ByteBuffer.wrap(chunk));
+                    } catch (IOException failure) {
+                        close();
+                        throw new java.io.UncheckedIOException(failure);
+                    } catch (RuntimeException failure) {
+                        close();
+                        throw failure;
+                    }
+                }
+            }, executor);
+        }
+
+        private void complete() throws IOException {
+            input.close();
+            closed = true;
+        }
+
+        @Override
+        public void close() {
+            if (!closed) {
+                closed = true;
+                input.abort();
+            }
+        }
+    }
+
     private MaterializedPayload materializeBlocking(PayloadReference reference, long maxBytes) {
         requireMaterializable(reference, maxBytes);
+        authority.verify(reference);
         S3Client resolvedClient = client(reference);
         HeadObjectRequest.Builder headRequest = HeadObjectRequest.builder()
             .bucket(reference.container())
@@ -223,7 +360,7 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
         String etag = normalizeEtag(item.eTag());
         long size = item.size() == null ? 0L : item.size();
         long lastModified = item.lastModified() == null ? 0L : item.lastModified().toEpochMilli();
-        PayloadReference reference = new PayloadReference(
+        PayloadReference reference = authority.issue(new PayloadReference(
             providerName(),
             bucket,
             item.key(),
@@ -233,7 +370,7 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
             size,
             null,
             referenceMetadata(source),
-            Optional.empty());
+            Optional.empty()));
         return new ObjectSourceItem(
             providerName(),
             bucket,

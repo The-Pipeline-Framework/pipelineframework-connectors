@@ -36,6 +36,7 @@ import org.pipelineframework.connector.ConnectorConfigurationDocument;
 import org.pipelineframework.connector.ConnectorOperation;
 import org.pipelineframework.connector.ConnectorProvider;
 import org.pipelineframework.connector.ConnectorProviderId;
+import org.pipelineframework.connector.ConnectorProviderLease;
 import org.pipelineframework.connector.ConnectorProviderVersion;
 import org.pipelineframework.connector.ConnectorRuntimeContext;
 import org.pipelineframework.connector.MaterializedPayload;
@@ -49,7 +50,6 @@ import org.pipelineframework.objectpublish.ObjectWriteResult;
 import org.pipelineframework.objectpublish.ObjectWriteSession;
 import org.pipelineframework.connector.objectingest.FilesystemObjectConnector;
 import org.pipelineframework.connector.objectingest.FilesystemObjectSourceProvider;
-import org.pipelineframework.connector.objectingest.FilesystemObjectTargetProvider;
 import org.pipelineframework.repository.PayloadReference;
 
 class FileRepresentationRuntimeTest {
@@ -218,14 +218,17 @@ class FileRepresentationRuntimeTest {
             PipelineObjectSourceConfig source = new PipelineObjectSourceConfig(
                 "documents", "object", "filesystem", Optional.of("documents"), Map.of("root", inputRoot.toString()),
                 null, null, null, PipelineObjectPayloadConfig.reference());
-            FilesystemObjectSourceProvider sourceProvider = new FilesystemObjectSourceProvider();
-            PayloadReference raw = sourceProvider.list(source, 10).getFirst().contentRef();
             FilesystemObjectConnector connector = new FilesystemObjectConnector();
+            // Issue the locator through the same provider authority that will consume it.
+            FilesystemObjectSourceProvider sourceProvider = connector.operations().stream()
+                .filter(FilesystemObjectSourceProvider.class::isInstance)
+                .map(FilesystemObjectSourceProvider.class::cast).findFirst().orElseThrow();
+            PayloadReference raw = sourceProvider.list(source, 10).getFirst().contentRef();
             ConnectorBindingRegistry bindings = ConnectorBindingRegistry.fromProviders(
                 List.of(new ConnectorBindingDefinition(
                     ConnectorBindingName.of("documents"), connector.id(), 1,
                     new ConnectorConfigurationDocument(Map.of()))),
-                List.of(connector));
+                List.of(connector), ignored -> ConnectorProviderLease.of(connector, () -> { }));
             PayloadReference owned = bindings.ownPayloadReference(
                 ConnectorBindingName.of("documents"), sourceProvider.id(), sourceProvider.majorVersion(), raw);
             FileRepresentationRuntime runtime = new FileRepresentationRuntime(
@@ -256,14 +259,17 @@ class FileRepresentationRuntimeTest {
             PipelineObjectSourceConfig source = new PipelineObjectSourceConfig(
                 "documents", "object", "filesystem", Optional.of("documents"), Map.of("root", inputRoot.toString()),
                 null, null, null, PipelineObjectPayloadConfig.reference());
-            FilesystemObjectSourceProvider sourceProvider = new FilesystemObjectSourceProvider();
-            PayloadReference raw = sourceProvider.list(source, 10).getFirst().contentRef();
             FilesystemObjectConnector connector = new FilesystemObjectConnector();
+            // Issue the locator through the same provider authority that will consume it.
+            FilesystemObjectSourceProvider sourceProvider = connector.operations().stream()
+                .filter(FilesystemObjectSourceProvider.class::isInstance)
+                .map(FilesystemObjectSourceProvider.class::cast).findFirst().orElseThrow();
+            PayloadReference raw = sourceProvider.list(source, 10).getFirst().contentRef();
             ConnectorBindingRegistry bindings = ConnectorBindingRegistry.fromProviders(
                 List.of(new ConnectorBindingDefinition(
                     ConnectorBindingName.of("documents"), connector.id(), 1,
                     new ConnectorConfigurationDocument(Map.of()))),
-                List.of(connector));
+                List.of(connector), ignored -> ConnectorProviderLease.of(connector, () -> { }));
             bindings.start(ConnectorRuntimeContext.empty()).toCompletableFuture().join();
             PayloadReference owned = bindings.ownPayloadReference(
                 ConnectorBindingName.of("documents"), sourceProvider.id(), sourceProvider.majorVersion(), raw);
@@ -276,7 +282,9 @@ class FileRepresentationRuntimeTest {
                 List.of(), null, null, Map.of());
             FileRepresentationRuntime runtime = new FileRepresentationRuntime(
                 bindings::materialize, bindings, config,
-                new ObjectTargetRegistry(List.of(new FilesystemObjectTargetProvider())));
+                new ObjectTargetRegistry(connector.operations().stream()
+                    .filter(ObjectTargetProvider.class::isInstance)
+                    .map(ObjectTargetProvider.class::cast).toList()));
 
             PayloadReference published = runtime.oneToOne(
                 owned, 1024, "rendered", 1024, Optional.empty(), input -> {

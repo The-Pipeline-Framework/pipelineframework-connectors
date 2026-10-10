@@ -3,7 +3,7 @@ package org.pipelineframework.connector.objectingest;
 import java.io.IOException;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -24,6 +24,7 @@ import java.util.stream.Stream;
 
 import org.pipelineframework.config.boundary.PipelineObjectSourceConfig;
 import org.pipelineframework.connector.MaterializedPayload;
+import org.pipelineframework.connector.ObjectReadSession;
 import org.pipelineframework.objectingest.ObjectSourceItem;
 import org.pipelineframework.objectingest.ObjectSourceProvider;
 import org.pipelineframework.repository.PayloadReference;
@@ -33,15 +34,24 @@ import org.pipelineframework.step.NonRetryableException;
  * Filesystem object source provider for local ingest and deterministic tests.
  */
 public class FilesystemObjectSourceProvider implements ObjectSourceProvider {
-    private static final String LOCATOR_DIGEST_METADATA = "tpf.filesystem.locator.sha256";
     private final Executor executor;
+    private final FilesystemReferenceAuthority authority;
 
     public FilesystemObjectSourceProvider() {
-        this(ForkJoinPool.commonPool());
+        this(ForkJoinPool.commonPool(), new FilesystemReferenceAuthority());
     }
 
     FilesystemObjectSourceProvider(Executor executor) {
+        this(executor, new FilesystemReferenceAuthority());
+    }
+
+    FilesystemObjectSourceProvider(FilesystemReferenceAuthority authority) {
+        this(ForkJoinPool.commonPool(), authority);
+    }
+
+    private FilesystemObjectSourceProvider(Executor executor, FilesystemReferenceAuthority authority) {
         this.executor = Objects.requireNonNull(executor, "filesystem source executor must not be null");
+        this.authority = Objects.requireNonNull(authority, "filesystem reference authority must not be null");
     }
 
     @Override
@@ -93,6 +103,22 @@ public class FilesystemObjectSourceProvider implements ObjectSourceProvider {
         return CompletableFuture.supplyAsync(() -> materializeBlocking(reference, maxBytes), executor);
     }
 
+    @Override
+    public CompletionStage<ObjectReadSession> openRead(PayloadReference reference) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                Path path = validatedPath(reference);
+                if (Files.size(path) != reference.sizeBytes()) {
+                    throw new IllegalStateException("Filesystem payload size mismatch: " + reference.key());
+                }
+                return new FilesystemReadSession(Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS),
+                    reference, executor);
+            } catch (IOException failure) {
+                throw new CompletionException(failure);
+            }
+        }, executor);
+    }
+
     private MaterializedPayload materializeBlocking(PayloadReference reference, long maxBytes) {
         try {
             if (reference == null) {
@@ -101,19 +127,10 @@ public class FilesystemObjectSourceProvider implements ObjectSourceProvider {
             if (maxBytes < 1) {
                 throw new IllegalArgumentException("maxBytes must be positive");
             }
-            if (!providerName().equalsIgnoreCase(reference.provider())) {
-                throw new IllegalArgumentException("filesystem operation cannot materialize provider=" + reference.provider());
-            }
-            if (reference.container() == null || reference.container().isBlank()) {
-                throw new IllegalArgumentException("filesystem payload reference container must not be blank");
-            }
             if (reference.sizeBytes() > maxBytes) {
                 throw inputTooLarge(reference.key());
             }
-            Path root = canonicalReferenceRoot(reference);
-            String key = canonicalReferenceKey(reference.key());
-            Path path = requireCanonicalUnderRoot(root, root.resolve(key), reference.key());
-            verifyLocatorProvenance(reference, root, key, path);
+            Path path = validatedPath(reference);
             byte[] bytes = readBounded(path, maxBytes, reference.key());
             String checksum = sha256(bytes);
             if (reference.checksum() != null && !reference.checksum().equalsIgnoreCase(checksum)) {
@@ -122,6 +139,93 @@ public class FilesystemObjectSourceProvider implements ObjectSourceProvider {
             return new MaterializedPayload(reference, bytes, reference.contentType(), reference.codec(), checksum);
         } catch (IOException failure) {
             throw new CompletionException(failure);
+        }
+    }
+
+    private Path validatedPath(PayloadReference reference) throws IOException {
+        Objects.requireNonNull(reference, "payload reference must not be null");
+        if (!providerName().equalsIgnoreCase(reference.provider())) {
+            throw new IllegalArgumentException("filesystem operation cannot read provider=" + reference.provider());
+        }
+        if (reference.container() == null || reference.container().isBlank()) {
+            throw new IllegalArgumentException("filesystem payload reference container must not be blank");
+        }
+        authority.verify(reference);
+        Path root = canonicalReferenceRoot(reference);
+        String key = canonicalReferenceKey(reference.key());
+        Path path = requireCanonicalUnderRoot(root, root.resolve(key), reference.key());
+        return path;
+    }
+
+    private static final class FilesystemReadSession implements ObjectReadSession {
+        private final InputStream input;
+        private final PayloadReference reference;
+        private final Executor executor;
+        private final MessageDigest digest;
+        private long delivered;
+        private volatile boolean closed;
+
+        private FilesystemReadSession(InputStream input, PayloadReference reference, Executor executor) {
+            this.input = input;
+            this.reference = reference;
+            this.executor = executor;
+            try {
+                this.digest = MessageDigest.getInstance("SHA-256");
+            } catch (java.security.NoSuchAlgorithmException failure) {
+                throw new IllegalStateException("SHA-256 digest is not available", failure);
+            }
+        }
+
+        @Override
+        public CompletionStage<Optional<ByteBuffer>> read(int maxBytes) {
+            if (maxBytes < 1 || maxBytes > 64 * 1024) {
+                throw new IllegalArgumentException("read size must be between 1 and 65536 bytes");
+            }
+            return CompletableFuture.supplyAsync(() -> {
+                synchronized (this) {
+                    if (closed) {
+                        throw new IllegalStateException("filesystem read session is closed");
+                    }
+                    try {
+                        byte[] chunk = input.readNBytes(maxBytes);
+                        if (chunk.length == 0) {
+                            if (delivered != reference.sizeBytes()) {
+                                throw new IllegalStateException("Filesystem payload size mismatch: " + reference.key());
+                            }
+                            String actual = HexFormat.of().formatHex(digest.digest());
+                            if (reference.checksum() != null && !reference.checksum().equalsIgnoreCase(actual)) {
+                                throw new IllegalStateException("Filesystem payload checksum mismatch: " + reference.key());
+                            }
+                            close();
+                            return Optional.empty();
+                        }
+                        if (chunk.length > reference.sizeBytes() - delivered) {
+                            throw new IllegalStateException("Filesystem payload size mismatch: " + reference.key());
+                        }
+                        delivered += chunk.length;
+                        digest.update(chunk);
+                        return Optional.of(ByteBuffer.wrap(chunk));
+                    } catch (IOException failure) {
+                        close();
+                        throw new CompletionException(failure);
+                    } catch (RuntimeException failure) {
+                        close();
+                        throw failure;
+                    }
+                }
+            }, executor);
+        }
+
+        @Override
+        public void close() {
+            if (!closed) {
+                closed = true;
+                try {
+                    input.close();
+                } catch (IOException failure) {
+                    throw new java.io.UncheckedIOException(failure);
+                }
+            }
         }
     }
 
@@ -151,7 +255,7 @@ public class FilesystemObjectSourceProvider implements ObjectSourceProvider {
             long lastModified = Files.getLastModifiedTime(path).toMillis();
             String etag = sha256(path);
             String contentType = Files.probeContentType(path);
-            PayloadReference reference = new PayloadReference(
+            PayloadReference unsigned = new PayloadReference(
                 providerName(),
                 root.toString(),
                 key,
@@ -160,10 +264,9 @@ public class FilesystemObjectSourceProvider implements ObjectSourceProvider {
                 etag,
                 size,
                 null,
-                Map.of(
-                    "source", source.name(),
-                    LOCATOR_DIGEST_METADATA, locatorDigest(root, key, path)),
+                Map.of("source", source.name()),
                 Optional.empty());
+            PayloadReference reference = authority.issue(unsigned);
             return new ObjectSourceItem(
                 providerName(),
                 root.toString(),
@@ -271,18 +374,6 @@ public class FilesystemObjectSourceProvider implements ObjectSourceProvider {
             throw new SecurityException("Filesystem object path escapes canonical root: " + key);
         }
         return canonical;
-    }
-
-    private void verifyLocatorProvenance(PayloadReference reference, Path root, String key, Path path) {
-        String expected = reference.metadata().get(LOCATOR_DIGEST_METADATA);
-        String actual = locatorDigest(root, key, path);
-        if (expected == null || !expected.equals(actual)) {
-            throw new IllegalStateException("Filesystem payload locator provenance mismatch: " + reference.key());
-        }
-    }
-
-    private String locatorDigest(Path root, String key, Path path) {
-        return sha256((root + "\n" + key + "\n" + path).getBytes(StandardCharsets.UTF_8));
     }
 
     private String sha256(Path path) throws IOException {

@@ -11,8 +11,9 @@ import org.pipelineframework.connector.ConnectorProviderVersion;
 /** Provider packaging for filesystem object source and target operations. */
 @ApplicationScoped
 public final class FilesystemObjectConnector implements ConnectorProvider<Void> {
-    private final FilesystemObjectSourceProvider source = new FilesystemObjectSourceProvider();
-    private final FilesystemObjectTargetProvider target = new FilesystemObjectTargetProvider();
+    private final FilesystemReferenceAuthority authority = new FilesystemReferenceAuthority();
+    private final FilesystemObjectSourceProvider source = new FilesystemObjectSourceProvider(authority);
+    private final FilesystemObjectTargetProvider target = new FilesystemObjectTargetProvider(authority);
 
     @Override
     public ConnectorProviderId id() {

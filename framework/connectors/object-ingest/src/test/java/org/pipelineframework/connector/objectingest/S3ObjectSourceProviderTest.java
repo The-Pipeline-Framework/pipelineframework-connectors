@@ -10,6 +10,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
+import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
@@ -23,10 +24,12 @@ import org.junit.jupiter.api.Test;
 import org.pipelineframework.config.boundary.PipelineObjectFilterConfig;
 import org.pipelineframework.config.boundary.PipelineObjectSourceConfig;
 import org.pipelineframework.connector.MaterializedPayload;
+import org.pipelineframework.connector.ObjectReadSession;
 import org.pipelineframework.objectingest.ObjectSourceItem;
 import org.pipelineframework.repository.PayloadReference;
 
 import software.amazon.awssdk.core.ResponseBytes;
+import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
@@ -35,6 +38,60 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 class S3ObjectSourceProviderTest {
+
+    @Test
+    void streamsBoundedS3ChunksAndClosesOnCancellation() {
+        S3Client client = mock(S3Client.class);
+        when(client.headObject(any(software.amazon.awssdk.services.s3.model.HeadObjectRequest.class)))
+            .thenReturn(HeadObjectResponse.builder().contentLength(3L).eTag("\"abc123\"").build());
+        ResponseInputStream<GetObjectResponse> response = new ResponseInputStream<>(
+            GetObjectResponse.builder().contentLength(3L).eTag("\"abc123\"").build(),
+            new ByteArrayInputStream(new byte[] {1, 2, 3}));
+        when(client.getObject(any(GetObjectRequest.class))).thenReturn(response);
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
+            ObjectReadSession session = provider.openRead(authority.issue(reference("invoice.pdf", "abc123", 3L)))
+                .toCompletableFuture().join();
+            byte[] first = new byte[1];
+            session.read(1).toCompletableFuture().join().orElseThrow().get(first);
+            assertArrayEquals(new byte[] {1}, first);
+            session.close();
+            assertThrows(CompletionException.class, () -> session.read(1).toCompletableFuture().join());
+        }
+        verify(client, never()).getObjectAsBytes(any(GetObjectRequest.class));
+    }
+
+    @Test
+    void streamingReadRejectsForgedS3ReferenceBeforeContactingS3() {
+        S3Client client = mock(S3Client.class);
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        PayloadReference issued = authority.issue(reference("invoice.pdf", "abc123", 3L));
+        PayloadReference altered = new PayloadReference(issued.provider(), issued.container(), "private.pdf",
+            issued.contentType(), issued.codec(), issued.checksum(), issued.sizeBytes(), issued.version(),
+            issued.metadata(), issued.connectorOrigin());
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
+            assertThrows(CompletionException.class, () -> provider
+                .openRead(altered).toCompletableFuture().join());
+        }
+        verify(client, never()).headObject(any(software.amazon.awssdk.services.s3.model.HeadObjectRequest.class));
+        verify(client, never()).getObject(any(GetObjectRequest.class));
+    }
+
+    @Test
+    void materializationRejectsForgedS3ReferenceBeforeContactingS3() {
+        S3Client client = mock(S3Client.class);
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        PayloadReference issued = authority.issue(reference("invoice.pdf", "abc123", 3L));
+        PayloadReference altered = new PayloadReference(issued.provider(), issued.container(), "private.pdf",
+            issued.contentType(), issued.codec(), issued.checksum(), issued.sizeBytes(), issued.version(),
+            issued.metadata(), issued.connectorOrigin());
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
+            assertThrows(CompletionException.class, () -> provider
+                .materialize(altered, 10L).toCompletableFuture().join());
+        }
+        verify(client, never()).headObject(any(software.amazon.awssdk.services.s3.model.HeadObjectRequest.class));
+        verify(client, never()).getObjectAsBytes(any(GetObjectRequest.class));
+    }
 
     @Test
     void materializesBindingOwnedS3ReferenceWithBoundedStableContent() {
@@ -54,11 +111,12 @@ class S3ObjectSourceProviderTest {
                     .build(),
                 new byte[] {1, 2, 3}));
 
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
         MaterializedPayload materialized = new S3ObjectSourceProvider(client, command -> {
             executorCalls.incrementAndGet();
             command.run();
-        })
-            .materialize(reference("invoice.pdf", "abc123", 3L), 10L)
+        }, authority)
+            .materialize(authority.issue(reference("invoice.pdf", "abc123", 3L)), 10L)
             .toCompletableFuture()
             .join();
 
@@ -90,9 +148,11 @@ class S3ObjectSourceProviderTest {
                 .eTag("\"different\"")
                 .build());
 
-        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client)) {
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
             assertThrows(CompletionException.class, () -> provider
-                .materialize(reference("invoice.pdf", "abc123", 3L), 10L).toCompletableFuture().join());
+                .materialize(authority.issue(reference("invoice.pdf", "abc123", 3L)), 10L)
+                .toCompletableFuture().join());
         }
 
         verify(client, never()).getObjectAsBytes(any(GetObjectRequest.class));
@@ -111,9 +171,11 @@ class S3ObjectSourceProviderTest {
                 GetObjectResponse.builder().eTag("\"abc123\"").build(),
                 new byte[] {1, 2, 3, 4}));
 
-        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client)) {
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
             assertThrows(CompletionException.class, () -> provider
-                .materialize(reference("invoice.pdf", "abc123", 3L), 3L).toCompletableFuture().join());
+                .materialize(authority.issue(reference("invoice.pdf", "abc123", 3L)), 3L)
+                .toCompletableFuture().join());
         }
     }
 
@@ -146,8 +208,9 @@ class S3ObjectSourceProviderTest {
             Optional.empty());
 
         MaterializedPayload materialized;
-        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client)) {
-            materialized = provider.materialize(published, 100L).toCompletableFuture().join();
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
+            materialized = provider.materialize(authority.issue(published), 100L).toCompletableFuture().join();
         }
 
         assertArrayEquals(bytes, materialized.bytes());
