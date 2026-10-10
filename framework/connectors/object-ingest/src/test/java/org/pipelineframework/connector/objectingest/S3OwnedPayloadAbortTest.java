@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.InputStream;
@@ -13,6 +14,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletionException;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.pipelineframework.connector.ObjectReadSession;
 import org.pipelineframework.repository.PayloadReference;
 
@@ -57,14 +59,33 @@ class S3OwnedPayloadAbortTest {
     void acceptedGetReadsOnlyDemandedBytesAndCancellationAbortsRemainder() {
         DrainingBody body = new DrainingBody();
         S3ReferenceAuthority authority = new S3ReferenceAuthority();
-        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client(body, "abc123"), Runnable::run, authority)) {
+        S3Client client = client(body, "abc123");
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
             ObjectReadSession session = provider.openRead(reference(authority)).toCompletableFuture().join();
+            ArgumentCaptor<GetObjectRequest> request = ArgumentCaptor.forClass(GetObjectRequest.class);
+            verify(client).getObject(request.capture());
+            assertEquals("\"abc123\"", request.getValue().ifMatch());
             assertEquals(0, body.bytesRead);
             assertEquals(1, session.read(1).toCompletableFuture().join().orElseThrow().remaining());
             assertEquals(1, body.bytesRead);
             session.close();
             assertEquals(1, body.bytesRead);
             assertEquals(1, body.aborts);
+        }
+    }
+
+    @Test
+    void completedGetClosesNormallyWithoutAborting() {
+        DrainingBody body = new DrainingBody();
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(
+            client(body, "abc123"), Runnable::run, authority)) {
+            ObjectReadSession session = provider.openRead(reference(authority)).toCompletableFuture().join();
+            assertEquals(3, session.read(3).toCompletableFuture().join().orElseThrow().remaining());
+            assertEquals(Optional.empty(), session.read(3).toCompletableFuture().join());
+            assertEquals(3, body.bytesRead);
+            assertEquals(1, body.closes);
+            assertEquals(0, body.aborts);
         }
     }
 
@@ -83,12 +104,13 @@ class S3OwnedPayloadAbortTest {
 
     private PayloadReference reference(S3ReferenceAuthority authority) {
         return authority.issue(new PayloadReference("s3", "docs", "invoice.pdf", "application/pdf", "raw",
-            "abc123", 3L, "", Map.of(), Optional.empty()));
+            "abc123", 3L, null, Map.of(), Optional.empty()));
     }
 
     private static final class DrainingBody extends InputStream {
         private int bytesRead;
         private int aborts;
+        private int closes;
 
         @Override
         public int read() {
@@ -100,6 +122,7 @@ class S3OwnedPayloadAbortTest {
 
         @Override
         public void close() {
+            closes++;
             while (read() != -1) {
                 // Apache-client close drains remaining response bytes for connection reuse.
             }

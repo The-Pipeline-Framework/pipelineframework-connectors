@@ -248,7 +248,7 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
                                     throw new IllegalStateException("S3 payload checksum mismatch: " + reference.key());
                                 }
                             });
-                            close();
+                            complete();
                             return Optional.empty();
                         }
                         if (chunk.length > reference.sizeBytes() - delivered) {
@@ -266,6 +266,11 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
                     }
                 }
             }, executor);
+        }
+
+        private void complete() throws IOException {
+            input.close();
+            closed = true;
         }
 
         @Override
