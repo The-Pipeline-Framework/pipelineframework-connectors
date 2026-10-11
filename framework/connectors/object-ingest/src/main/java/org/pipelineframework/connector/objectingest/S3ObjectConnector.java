@@ -18,7 +18,11 @@ public final class S3ObjectConnector implements ConnectorProvider<Void> {
     private final S3ObjectTargetProvider target;
 
     public S3ObjectConnector() {
-        this(new S3ObjectSourceProvider(), new S3ObjectTargetProvider());
+        this(new S3ReferenceAuthority());
+    }
+
+    private S3ObjectConnector(S3ReferenceAuthority authority) {
+        this(new S3ObjectSourceProvider(authority), new S3ObjectTargetProvider(authority));
     }
 
     S3ObjectConnector(S3ObjectSourceProvider source, S3ObjectTargetProvider target) {

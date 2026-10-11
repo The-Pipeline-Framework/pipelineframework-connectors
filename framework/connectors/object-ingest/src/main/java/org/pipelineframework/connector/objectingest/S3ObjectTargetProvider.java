@@ -64,6 +64,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
     private static final int MIN_PART_SIZE_BYTES = 5 * 1024 * 1024;
 
     private final Optional<S3Client> client;
+    private final S3ReferenceAuthority authority;
     private final boolean ownsClient;
     private final Executor executor;
     private final boolean ownsExecutor;
@@ -73,16 +74,23 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
     private boolean closed;
 
     public S3ObjectTargetProvider() {
-        this(Optional.empty(), true, Executors.newVirtualThreadPerTaskExecutor(), true, DEFAULT_PART_SIZE_BYTES);
+        this(Optional.empty(), true, Executors.newVirtualThreadPerTaskExecutor(), true, DEFAULT_PART_SIZE_BYTES,
+            new S3ReferenceAuthority());
+    }
+
+    S3ObjectTargetProvider(S3ReferenceAuthority authority) {
+        this(Optional.empty(), true, Executors.newVirtualThreadPerTaskExecutor(), true, DEFAULT_PART_SIZE_BYTES,
+            authority);
     }
 
     public S3ObjectTargetProvider(S3Client client) {
         this(Optional.of(Objects.requireNonNull(client, "client")), false, Executors.newVirtualThreadPerTaskExecutor(), true,
-            DEFAULT_PART_SIZE_BYTES);
+            DEFAULT_PART_SIZE_BYTES, new S3ReferenceAuthority());
     }
 
     S3ObjectTargetProvider(S3Client client, Executor executor, int partSizeBytes) {
-        this(Optional.of(Objects.requireNonNull(client, "client")), false, executor, false, partSizeBytes);
+        this(Optional.of(Objects.requireNonNull(client, "client")), false, executor, false, partSizeBytes,
+            new S3ReferenceAuthority());
     }
 
     private S3ObjectTargetProvider(
@@ -90,9 +98,11 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
         boolean ownsClient,
         Executor executor,
         boolean ownsExecutor,
-        int partSizeBytes
+        int partSizeBytes,
+        S3ReferenceAuthority authority
     ) {
         this.client = client;
+        this.authority = Objects.requireNonNull(authority, "S3 reference authority must not be null");
         this.ownsClient = ownsClient;
         this.executor = executor;
         this.ownsExecutor = ownsExecutor;
@@ -116,7 +126,8 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
                 .contentType(request.contentType())
                 .metadata(request.metadata())
                 .build());
-            return new S3WriteSession(request, s3, bucket, key, response.uploadId(), executor, partSizeBytes);
+            return new S3WriteSession(request, s3, bucket, key, response.uploadId(), executor, partSizeBytes,
+                authority);
         }, executor);
     }
 
@@ -227,9 +238,9 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
         metadata.put(S3ObjectSourceProvider.CHECKSUM_KIND_METADATA, S3ObjectSourceProvider.CHECKSUM_KIND_SHA256);
         location(request.target(), "region")
             .ifPresent(region -> metadata.put(S3ObjectSourceProvider.REGION_METADATA, region));
-        PayloadReference reference = new PayloadReference(
+        PayloadReference reference = authority.issue(new PayloadReference(
             "s3", bucket, finalKey, request.contentType(), "raw", checksum, totalBytes,
-            null, metadata, Optional.empty());
+            null, metadata, Optional.empty()));
         return new ObjectWriteResult(reference, totalBytes, checksum, Instant.now());
     }
 
@@ -378,6 +389,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
         private final String uploadId;
         private final Executor executor;
         private final int partSizeBytes;
+        private final S3ReferenceAuthority authority;
         private final List<CompletedPart> parts = new ArrayList<>();
         private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         private final MessageDigest digest = sha256Digest();
@@ -394,7 +406,8 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
             String key,
             String uploadId,
             Executor executor,
-            int partSizeBytes
+            int partSizeBytes,
+            S3ReferenceAuthority authority
         ) {
             this.request = request;
             this.client = client;
@@ -403,6 +416,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
             this.uploadId = uploadId;
             this.executor = executor;
             this.partSizeBytes = partSizeBytes;
+            this.authority = authority;
         }
 
         @Override
@@ -465,7 +479,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
                     S3ObjectSourceProvider.CHECKSUM_KIND_SHA256);
                 location(request.target(), "region")
                     .ifPresent(region -> metadata.put(S3ObjectSourceProvider.REGION_METADATA, region));
-                PayloadReference reference = new PayloadReference(
+                PayloadReference reference = authority.issue(new PayloadReference(
                     "s3",
                     bucket,
                     key,
@@ -475,7 +489,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
                     writtenBytes,
                     null,
                     metadata,
-                    Optional.empty());
+                    Optional.empty()));
                 return new ObjectWriteResult(reference, writtenBytes, actualChecksum, Instant.now());
             }, executor);
             operationTail = close.thenApply(ignored -> null);

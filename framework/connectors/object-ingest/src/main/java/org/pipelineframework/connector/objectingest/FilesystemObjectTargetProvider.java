@@ -10,7 +10,6 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.nio.charset.StandardCharsets;
 import java.nio.channels.FileChannel;
 import java.nio.file.attribute.PosixFileAttributeView;
 import java.security.MessageDigest;
@@ -44,15 +43,24 @@ import org.pipelineframework.repository.PayloadReference;
  * Filesystem object target provider for Object Publish.
  */
 public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider {
-    private static final String LOCATOR_DIGEST_METADATA = "tpf.filesystem.locator.sha256";
     private final Executor executor;
+    private final FilesystemReferenceAuthority authority;
 
     public FilesystemObjectTargetProvider() {
-        this(ForkJoinPool.commonPool());
+        this(ForkJoinPool.commonPool(), new FilesystemReferenceAuthority());
     }
 
     FilesystemObjectTargetProvider(Executor executor) {
+        this(executor, new FilesystemReferenceAuthority());
+    }
+
+    FilesystemObjectTargetProvider(FilesystemReferenceAuthority authority) {
+        this(ForkJoinPool.commonPool(), authority);
+    }
+
+    private FilesystemObjectTargetProvider(Executor executor, FilesystemReferenceAuthority authority) {
         this.executor = executor;
+        this.authority = authority;
     }
 
     @Override
@@ -151,14 +159,9 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
             Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
             metadata.put("target", request.targetName());
             Path canonicalRoot = root.toRealPath();
-            Path canonicalPath = finalPath.toRealPath();
-            metadata.put(
-                LOCATOR_DIGEST_METADATA,
-                sha256((canonicalRoot + "\n" + request.objectKey() + "\n" + canonicalPath)
-                    .getBytes(StandardCharsets.UTF_8)));
-            PayloadReference reference = new PayloadReference(
+            PayloadReference reference = authority.issue(new PayloadReference(
                 "filesystem", canonicalRoot.toString(), request.objectKey(), request.contentType(),
-                "raw", checksum, bytes, null, metadata, Optional.empty());
+                "raw", checksum, bytes, null, metadata, Optional.empty()));
             return new ObjectWriteResult(reference, bytes, checksum, Instant.now());
         } catch (IOException | NoSuchAlgorithmException | RuntimeException failure) {
             deleteWithSuppressedFailure(temp, failure);
@@ -197,14 +200,6 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
         }
     }
 
-    private static String sha256(byte[] bytes) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-        } catch (NoSuchAlgorithmException failure) {
-            throw new IllegalStateException("SHA-256 is unavailable", failure);
-        }
-    }
-
     private static long copyAndDigest(InputStream input, OutputStream output, MessageDigest digest) throws IOException {
         byte[] buffer = new byte[64 * 1024];
         long bytes = 0;
@@ -228,7 +223,7 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
             }
             Path tempPath = Files.createTempFile(parent == null ? root : parent, ".tpf-publish-", ".tmp");
             OutputStream output = new BufferedOutputStream(Files.newOutputStream(tempPath));
-            return new FilesystemWriteSession(request, root, finalPath, tempPath, output, executor);
+            return new FilesystemWriteSession(request, root, finalPath, tempPath, output, executor, authority);
         } catch (IOException e) {
             throw new CompletionException(e);
         }
@@ -260,7 +255,18 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
         private final Path tempPath;
         private final OutputStream output;
         private final Executor executor;
+        private final FilesystemReferenceAuthority authority;
+        private final MessageDigest digest = sha256();
+        private long bytesWritten;
         private boolean closed;
+
+        private static MessageDigest sha256() {
+            try {
+                return MessageDigest.getInstance("SHA-256");
+            } catch (NoSuchAlgorithmException failure) {
+                throw new IllegalStateException("SHA-256 unavailable", failure);
+            }
+        }
 
         private FilesystemWriteSession(
             ObjectWriteOpenRequest request,
@@ -268,7 +274,8 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
             Path finalPath,
             Path tempPath,
             OutputStream output,
-            Executor executor
+            Executor executor,
+            FilesystemReferenceAuthority authority
         ) {
             this.request = request;
             this.root = root;
@@ -276,6 +283,7 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
             this.tempPath = tempPath;
             this.output = output;
             this.executor = executor;
+            this.authority = authority;
         }
 
         @Override
@@ -288,6 +296,8 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
                     }
                     try {
                         output.write(bytes);
+                        digest.update(bytes);
+                        bytesWritten += bytes.length;
                     } catch (IOException e) {
                         throw new CompletionException(e);
                     }
@@ -308,27 +318,28 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
                         forceFile(tempPath);
                         Map<String, String> metadata = metadata(closeRequest);
                         validatePagedMetadata(metadata);
+                        String checksum = HexFormat.of().formatHex(digest.digest());
+                        if (closeRequest.bytes() != bytesWritten
+                            || (closeRequest.checksum() != null
+                                && !closeRequest.checksum().equalsIgnoreCase(checksum))) {
+                            throw new IllegalArgumentException("filesystem write byte count or checksum mismatch");
+                        }
                         moveAtomicallyReplacingExistingTarget();
                         writePageManifestIfRequired(metadata);
                         metadata.put("target", request.targetName());
                         Path canonicalRoot = root.toRealPath();
-                        Path canonicalPath = finalPath.toRealPath();
-                        metadata.put(
-                            LOCATOR_DIGEST_METADATA,
-                            sha256((canonicalRoot + "\n" + request.objectKey() + "\n" + canonicalPath)
-                                .getBytes(StandardCharsets.UTF_8)));
-                        PayloadReference reference = new PayloadReference(
+                        PayloadReference reference = authority.issue(new PayloadReference(
                             "filesystem",
                             canonicalRoot.toString(),
                             request.objectKey(),
                             request.contentType(),
                             "raw",
-                            closeRequest.checksum(),
-                            closeRequest.bytes(),
+                            checksum,
+                            bytesWritten,
                             null,
                             metadata,
-                            Optional.empty());
-                        return new ObjectWriteResult(reference, closeRequest.bytes(), closeRequest.checksum(), Instant.now());
+                            Optional.empty()));
+                        return new ObjectWriteResult(reference, bytesWritten, checksum, Instant.now());
                     } catch (IOException | RuntimeException e) {
                         cleanupTemporaryFile(e);
                         throw new CompletionException(e);
@@ -420,14 +431,6 @@ public class FilesystemObjectTargetProvider implements PagedObjectTargetProvider
             byte[] bytes = new byte[duplicate.remaining()];
             duplicate.get(bytes);
             return bytes;
-        }
-
-        private static String sha256(byte[] bytes) {
-            try {
-                return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            } catch (NoSuchAlgorithmException failure) {
-                throw new IllegalStateException("SHA-256 is unavailable", failure);
-            }
         }
 
         private void moveAtomicallyReplacingExistingTarget() throws IOException {
