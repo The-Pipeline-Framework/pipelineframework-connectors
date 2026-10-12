@@ -3,6 +3,7 @@ package org.pipelineframework.connector.objectingest;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -33,7 +34,7 @@ import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
-/** Run against a local S3 emulator with TPF_LOCALSTACK_ENDPOINT and AWS_ENDPOINT_URL_S3 set alike. */
+/** Run against a local S3 emulator with TPF_LOCALSTACK_ENDPOINT. */
 @EnabledIfEnvironmentVariable(named = "TPF_LOCALSTACK_ENDPOINT", matches = ".+")
 class S3DelegatedUploadLocalstackIT {
     @Test
@@ -69,16 +70,21 @@ class S3DelegatedUploadLocalstackIT {
                 assertThrows(CompletionException.class, () -> provider.part(target, reservation.token(),
                     Map.of("tpf.payload.owner.tenant", "tenant-b"), 1).toCompletableFuture().join());
                 int partSize = reservation.partSizeBytes();
-                upload(http, provider.part(target, reservation.token(), owner, 1).toCompletableFuture().join(),
-                    Arrays.copyOfRange(content, 0, partSize));
+                var firstPart = provider.part(target, reservation.token(), owner, 1).toCompletableFuture().join();
+                assertEquals(URI.create(endpoint).getHost(), URI.create(firstPart.url()).getHost());
+                assertTrue(firstPart.url().contains("X-Amz-Credential=test"));
+                upload(http, firstPart, Arrays.copyOfRange(content, 0, partSize));
                 upload(http, provider.part(target, reservation.token(), owner, 2).toCompletableFuture().join(),
                     Arrays.copyOfRange(content, partSize, content.length));
                 var reference = provider.complete(target, reservation.token(), owner)
                     .toCompletableFuture().join().reference();
                 assertEquals(checksum, reference.checksum());
                 assertEquals(content.length, reference.sizeBytes());
+                assertTrue(reference.metadata().containsKey(S3ObjectSourceProvider.ORIGINAL_ETAG_METADATA));
                 var download = source.authorizeDownload(reference, Duration.ofMinutes(1))
                     .toCompletableFuture().join();
+                assertEquals(URI.create(endpoint).getHost(), URI.create(download.url()).getHost());
+                assertTrue(download.url().contains("X-Amz-Credential=test"));
                 HttpRequest.Builder get = HttpRequest.newBuilder(URI.create(download.url())).GET();
                 download.headers().forEach(get::header);
                 var response = http.send(get.build(), HttpResponse.BodyHandlers.ofByteArray());

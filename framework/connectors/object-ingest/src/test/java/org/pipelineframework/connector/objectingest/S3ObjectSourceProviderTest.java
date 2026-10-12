@@ -218,6 +218,25 @@ class S3ObjectSourceProviderTest {
     }
 
     @Test
+    void refusesDownloadCapabilityAfterAnUnversionedSha256ObjectIsReplaced() {
+        S3Client client = mock(S3Client.class);
+        when(client.headObject(any(software.amazon.awssdk.services.s3.model.HeadObjectRequest.class)))
+            .thenReturn(HeadObjectResponse.builder().contentLength(3L).eTag("\"replacement\"").build());
+        S3ReferenceAuthority authority = new S3ReferenceAuthority();
+        PayloadReference reference = authority.issue(new PayloadReference("s3", "docs", "published.pdf",
+            "application/pdf", "raw", "a".repeat(64), 3L, null,
+            Map.of(S3ObjectSourceProvider.CHECKSUM_KIND_METADATA,
+                    S3ObjectSourceProvider.CHECKSUM_KIND_SHA256,
+                S3ObjectSourceProvider.ORIGINAL_ETAG_METADATA, "original"), Optional.empty()));
+
+        try (S3ObjectSourceProvider provider = new S3ObjectSourceProvider(client, Runnable::run, authority)) {
+            assertThrows(CompletionException.class, () -> provider
+                .authorizeDownload(reference, java.time.Duration.ofMinutes(1)).toCompletableFuture().join());
+        }
+        verify(client, never()).getObject(any(GetObjectRequest.class));
+    }
+
+    @Test
     void mapsListedS3ObjectsToSourceItems() {
         S3Client client = mock(S3Client.class);
         when(client.listObjectsV2(any(software.amazon.awssdk.services.s3.model.ListObjectsV2Request.class)))

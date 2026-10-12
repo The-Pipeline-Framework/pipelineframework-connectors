@@ -41,6 +41,9 @@ final class S3DelegatedUploadToken {
             out.writeUTF(claims.sha256());
             out.writeLong(claims.expiresAt().getEpochSecond());
             out.writeUTF(claims.idempotencyKey());
+            if (claims.metadata().size() > 32) {
+                throw new IllegalArgumentException("upload token metadata exceeds 32 entries");
+            }
             out.writeInt(claims.metadata().size());
             claims.metadata().entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
                 try {
@@ -62,6 +65,14 @@ final class S3DelegatedUploadToken {
     }
 
     Claims verify(String token, Instant now) {
+        Claims claims = inspect(token);
+        if (!claims.expiresAt().isAfter(now)) {
+            throw new SecurityException("S3 upload token is invalid or expired");
+        }
+        return claims;
+    }
+
+    Claims inspect(String token) {
         if (token == null || token.length() > 6000) throw new SecurityException("invalid S3 upload token");
         try {
             byte[] signed = Base64.getUrlDecoder().decode(token);
@@ -94,9 +105,7 @@ final class S3DelegatedUploadToken {
                     throw new SecurityException("duplicate S3 upload token metadata");
                 }
             }
-            if (in.available() != 0 || !expires.isAfter(now)) {
-                throw new SecurityException("S3 upload token is invalid or expired");
-            }
+            if (in.available() != 0) throw new SecurityException("invalid S3 upload token");
             if (bytes < 1 || partSizeBytes < 5 * 1024 * 1024 || !sha256.matches("[a-f0-9]{64}")) {
                 throw new SecurityException("invalid S3 upload token content");
             }

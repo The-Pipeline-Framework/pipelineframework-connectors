@@ -50,6 +50,7 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, DelegatedPa
     static final String CHECKSUM_KIND_METADATA = "tpf.s3.checksum.kind";
     static final String CHECKSUM_KIND_ETAG = "etag";
     static final String CHECKSUM_KIND_SHA256 = "sha256";
+    static final String ORIGINAL_ETAG_METADATA = "tpf.s3.original-etag";
     static final String REGION_METADATA = "tpf.s3.region";
     static final String PATH_STYLE_METADATA = "tpf.s3.path-style-access";
 
@@ -219,6 +220,10 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, DelegatedPa
             }
             requireMaterializable(reference, Long.MAX_VALUE);
             authority.verify(reference);
+            if (reference.version() == null && CHECKSUM_KIND_SHA256.equalsIgnoreCase(checksumKind(reference))
+                && expectedEtag(reference).isEmpty()) {
+                throw new SecurityException("SHA-256 download reference is not bound to an S3 object revision");
+            }
             S3Client resolved = client(reference);
             HeadObjectRequest.Builder head = HeadObjectRequest.builder()
                 .bucket(reference.container()).key(reference.key());
@@ -238,14 +243,8 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, DelegatedPa
             } else {
                 get.ifMatch(quoteEtag(normalizeEtag(current.eTag())));
             }
-            var presignerBuilder = S3Presigner.builder();
-            String region = reference.metadata().get(REGION_METADATA);
-            if (region != null && !region.isBlank()) presignerBuilder.region(Region.of(region));
-            if (Boolean.parseBoolean(reference.metadata().get(PATH_STYLE_METADATA))) {
-                presignerBuilder.serviceConfiguration(software.amazon.awssdk.services.s3.S3Configuration.builder()
-                    .pathStyleAccessEnabled(true).build());
-            }
-            try (S3Presigner presigner = presignerBuilder.build()) {
+            try (S3Presigner presigner = S3Presigners.forClient(resolved,
+                Boolean.parseBoolean(reference.metadata().get(PATH_STYLE_METADATA)))) {
                 var signed = presigner.presignGetObject(GetObjectPresignRequest.builder()
                     .signatureDuration(lifetime).getObjectRequest(get.build()).build());
                 return new DownloadCapability(signed.url().toExternalForm(), signed.signedHeaders().entrySet().stream()
@@ -511,8 +510,11 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, DelegatedPa
     }
 
     private Optional<String> expectedEtag(PayloadReference reference) {
-        return CHECKSUM_KIND_ETAG.equalsIgnoreCase(checksumKind(reference))
-            ? Optional.ofNullable(reference.checksum())
+        if (CHECKSUM_KIND_ETAG.equalsIgnoreCase(checksumKind(reference))) {
+            return Optional.ofNullable(reference.checksum());
+        }
+        return CHECKSUM_KIND_SHA256.equalsIgnoreCase(checksumKind(reference))
+            ? Optional.ofNullable(reference.metadata().get(ORIGINAL_ETAG_METADATA))
             : Optional.empty();
     }
 

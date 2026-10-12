@@ -39,6 +39,7 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadResponse;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
@@ -48,12 +49,15 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 
 class S3ObjectTargetProviderTest {
 
     @Test
     void streamsMultipartUploadAndCompletesOnClose() {
         S3Client client = mock(S3Client.class);
+        when(client.completeMultipartUpload(any(CompleteMultipartUploadRequest.class)))
+            .thenReturn(CompleteMultipartUploadResponse.builder().eTag("completed-etag").build());
         when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
             .thenReturn(CreateMultipartUploadResponse.builder().uploadId("upload-1").build());
         when(client.uploadPart(any(UploadPartRequest.class), any(RequestBody.class)))
@@ -84,6 +88,8 @@ class S3ObjectTargetProviderTest {
             S3ObjectSourceProvider.CHECKSUM_KIND_SHA256,
             result.reference().metadata().get(S3ObjectSourceProvider.CHECKSUM_KIND_METADATA));
         assertEquals(sha256(payload), result.reference().checksum());
+        assertEquals("completed-etag",
+            result.reference().metadata().get(S3ObjectSourceProvider.ORIGINAL_ETAG_METADATA));
     }
 
     @Test
@@ -113,6 +119,8 @@ class S3ObjectTargetProviderTest {
     @Test
     void trimsConfiguredRegionInPublishedReferenceMetadata() {
         S3Client client = mock(S3Client.class);
+        when(client.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
+            .thenReturn(PutObjectResponse.builder().eTag("empty-etag").build());
         when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
             .thenReturn(CreateMultipartUploadResponse.builder().uploadId("upload-1").build());
         S3ObjectTargetProvider provider = new S3ObjectTargetProvider(client, Runnable::run, 5 * 1024 * 1024);
@@ -140,6 +148,8 @@ class S3ObjectTargetProviderTest {
     @Test
     void serializesOverlappingWritesBeforeCloseAndRejectsLaterWrites() throws Exception {
         S3Client client = mock(S3Client.class);
+        when(client.completeMultipartUpload(any(CompleteMultipartUploadRequest.class)))
+            .thenReturn(CompleteMultipartUploadResponse.builder().eTag("completed-etag").build());
         when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
             .thenReturn(CreateMultipartUploadResponse.builder().uploadId("upload-1").build());
         CountDownLatch uploadStarted = new CountDownLatch(1);
@@ -230,6 +240,8 @@ class S3ObjectTargetProviderTest {
     @Test
     void streamComposesS3PagePartsWithFinalObjectParity() throws Exception {
         S3Client client = mock(S3Client.class);
+        when(client.completeMultipartUpload(any(CompleteMultipartUploadRequest.class)))
+            .thenReturn(CompleteMultipartUploadResponse.builder().eTag("compose-completed-etag").build());
         when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
             .thenReturn(CreateMultipartUploadResponse.builder().uploadId("compose-upload").build());
         byte[] first = "first,\"María\nGarcía\"\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
