@@ -22,6 +22,7 @@ import java.util.concurrent.Executors;
 
 import org.pipelineframework.config.boundary.PipelineObjectSourceConfig;
 import org.pipelineframework.connector.MaterializedPayload;
+import org.pipelineframework.connector.DelegatedPayloadSource;
 import org.pipelineframework.connector.ObjectReadSession;
 import org.pipelineframework.objectingest.ObjectSourceItem;
 import org.pipelineframework.objectingest.ObjectSourceProvider;
@@ -39,15 +40,19 @@ import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.S3Object;
+import software.amazon.awssdk.services.s3.presigner.S3Presigner;
+import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
 
 /**
  * Plain AWS SDK S3 object source provider.
  */
-public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseable {
+public class S3ObjectSourceProvider implements ObjectSourceProvider, DelegatedPayloadSource, AutoCloseable {
     static final String CHECKSUM_KIND_METADATA = "tpf.s3.checksum.kind";
     static final String CHECKSUM_KIND_ETAG = "etag";
     static final String CHECKSUM_KIND_SHA256 = "sha256";
+    static final String ORIGINAL_ETAG_METADATA = "tpf.s3.original-etag";
     static final String REGION_METADATA = "tpf.s3.region";
+    static final String PATH_STYLE_METADATA = "tpf.s3.path-style-access";
 
     private final Optional<S3Client> client;
     private final S3ReferenceAuthority authority;
@@ -201,6 +206,52 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
                     failure.addSuppressed(abortFailure);
                 }
                 throw failure;
+            }
+        }, executor);
+    }
+
+    @Override
+    public CompletionStage<DownloadCapability> authorizeDownload(PayloadReference reference,
+                                                                   java.time.Duration lifetime) {
+        return CompletableFuture.supplyAsync(() -> {
+            if (lifetime == null || lifetime.isNegative() || lifetime.isZero()
+                || lifetime.compareTo(java.time.Duration.ofMinutes(5)) > 0) {
+                throw new IllegalArgumentException("invalid delegated download lifetime");
+            }
+            requireMaterializable(reference, Long.MAX_VALUE);
+            authority.verify(reference);
+            if (reference.version() == null && CHECKSUM_KIND_SHA256.equalsIgnoreCase(checksumKind(reference))
+                && expectedEtag(reference).isEmpty()) {
+                throw new SecurityException("SHA-256 download reference is not bound to an S3 object revision");
+            }
+            S3Client resolved = client(reference);
+            HeadObjectRequest.Builder head = HeadObjectRequest.builder()
+                .bucket(reference.container()).key(reference.key());
+            if (reference.version() != null) head.versionId(reference.version());
+            var current = resolved.headObject(head.build());
+            verifyEtag(reference, current.eTag());
+            if (current.contentLength() == null || current.contentLength() != reference.sizeBytes()) {
+                throw new IllegalStateException("S3 payload size mismatch: " + reference.key());
+            }
+            if (reference.version() == null && normalizeEtag(current.eTag()) == null) {
+                throw new IllegalStateException("S3 payload ETag is required for delegated download");
+            }
+            GetObjectRequest.Builder get = GetObjectRequest.builder()
+                .bucket(reference.container()).key(reference.key());
+            if (reference.version() != null) {
+                get.versionId(reference.version());
+            } else {
+                get.ifMatch(quoteEtag(normalizeEtag(current.eTag())));
+            }
+            try (S3Presigner presigner = S3Presigners.forClient(resolved,
+                Boolean.parseBoolean(reference.metadata().get(PATH_STYLE_METADATA)))) {
+                var signed = presigner.presignGetObject(GetObjectPresignRequest.builder()
+                    .signatureDuration(lifetime).getObjectRequest(get.build()).build());
+                return new DownloadCapability(signed.url().toExternalForm(), signed.signedHeaders().entrySet().stream()
+                    .filter(entry -> !entry.getKey().equalsIgnoreCase("host"))
+                    .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey,
+                        entry -> String.join(",", entry.getValue()))),
+                    java.time.Instant.now().plus(lifetime), reference.sizeBytes(), reference.checksum());
             }
         }, executor);
     }
@@ -386,6 +437,9 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
     }
 
     private boolean matches(PipelineObjectSourceConfig source, String key) {
+        if (key.startsWith(".tpf-delegated/") || key.contains("/.tpf-delegated/")) {
+            return false;
+        }
         boolean included = source.filter().include().isEmpty()
             || source.filter().include().stream().anyMatch(pattern -> globMatches(pattern, key));
         boolean excluded = source.filter().exclude().stream().anyMatch(pattern -> globMatches(pattern, key));
@@ -456,8 +510,11 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
     }
 
     private Optional<String> expectedEtag(PayloadReference reference) {
-        return CHECKSUM_KIND_ETAG.equalsIgnoreCase(checksumKind(reference))
-            ? Optional.ofNullable(reference.checksum())
+        if (CHECKSUM_KIND_ETAG.equalsIgnoreCase(checksumKind(reference))) {
+            return Optional.ofNullable(reference.checksum());
+        }
+        return CHECKSUM_KIND_SHA256.equalsIgnoreCase(checksumKind(reference))
+            ? Optional.ofNullable(reference.metadata().get(ORIGINAL_ETAG_METADATA))
             : Optional.empty();
     }
 
@@ -501,13 +558,13 @@ public class S3ObjectSourceProvider implements ObjectSourceProvider, AutoCloseab
     }
 
     private Map<String, String> referenceMetadata(PipelineObjectSourceConfig source) {
-        String region = optional(source, "region").orElse(null);
-        return region == null
-            ? Map.of("source", source.name(), CHECKSUM_KIND_METADATA, CHECKSUM_KIND_ETAG)
-            : Map.of(
-                "source", source.name(),
-                REGION_METADATA, region,
-                CHECKSUM_KIND_METADATA, CHECKSUM_KIND_ETAG);
+        Map<String, String> metadata = new java.util.LinkedHashMap<>();
+        metadata.put("source", source.name());
+        metadata.put(CHECKSUM_KIND_METADATA, CHECKSUM_KIND_ETAG);
+        optional(source, "region").ifPresent(region -> metadata.put(REGION_METADATA, region));
+        optional(source, "pathStyleAccess").ifPresent(pathStyle ->
+            metadata.put(PATH_STYLE_METADATA, pathStyle));
+        return Map.copyOf(metadata);
     }
 
     private String sha256(byte[] payload) {

@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.io.IOException;
 import java.io.ByteArrayInputStream;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -24,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import org.pipelineframework.config.boundary.PipelineObjectPublishConfig;
+import org.pipelineframework.connector.DelegatedPayloadTarget;
 import org.pipelineframework.objectpublish.ObjectTargetProvider;
 import org.pipelineframework.objectpublish.PagedObjectTargetProvider;
 import org.pipelineframework.objectpublish.PagedObjectPart;
@@ -55,23 +57,32 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.ListPartsRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.presigner.S3Presigner;
+import software.amazon.awssdk.services.s3.presigner.model.UploadPartPresignRequest;
 
 /**
  * Plain AWS SDK S3 object target provider for Object Publish.
  */
-public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCloseable {
+public class S3ObjectTargetProvider implements PagedObjectTargetProvider, DelegatedPayloadTarget, AutoCloseable {
     static final int DEFAULT_PART_SIZE_BYTES = 8 * 1024 * 1024;
     private static final int MIN_PART_SIZE_BYTES = 5 * 1024 * 1024;
 
     private final Optional<S3Client> client;
     private final S3ReferenceAuthority authority;
+    private final S3DelegatedUploadToken delegatedTokens = new S3DelegatedUploadToken();
     private final boolean ownsClient;
     private final Executor executor;
     private final boolean ownsExecutor;
     private final int partSizeBytes;
     private final ConcurrentMap<ClientConfiguration, S3Client> resolvedClients = new ConcurrentHashMap<>();
+    private final ConcurrentMap<PresignerConfiguration, S3Presigner> presigners = new ConcurrentHashMap<>();
     private final Object lifecycleLock = new Object();
     private boolean closed;
+
+    private record PresignerConfiguration(S3Client client, boolean pathStyleAccess) { }
 
     public S3ObjectTargetProvider() {
         this(Optional.empty(), true, Executors.newVirtualThreadPerTaskExecutor(), true, DEFAULT_PART_SIZE_BYTES,
@@ -129,6 +140,280 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
             return new S3WriteSession(request, s3, bucket, key, response.uploadId(), executor, partSizeBytes,
                 authority);
         }, executor);
+    }
+
+    @Override
+    public CompletionStage<Reservation> initiate(DelegatedPayloadTarget.Request request) {
+        return CompletableFuture.supplyAsync(() -> {
+            if (request.bytes() < 1 || request.sha256() == null
+                || !request.sha256().matches("[a-f0-9]{64}")
+                || request.idempotencyKey() == null
+                || !request.idempotencyKey().matches("[A-Za-z0-9._:-]{1,128}")
+                || ((request.bytes() - 1) / partSizeBytes) + 1 > 10_000
+                || !request.expiresAt().isAfter(Instant.now())) {
+                throw new IllegalArgumentException("invalid delegated S3 upload request");
+            }
+            String randomKey = "uploads/" + java.util.UUID.randomUUID();
+            ObjectWriteOpenRequest open = new ObjectWriteOpenRequest(request.targetName(), request.target(),
+                randomKey, request.contentType(), request.metadata(), request.idempotencyKey());
+            String bucket = required(open, "bucket");
+            String key = objectKey(open);
+            S3Client s3 = client(open);
+            String markerKey = delegatedMarkerKey(open, request.idempotencyKey());
+            try {
+                return reusedReservation(s3, bucket, markerKey, request);
+            } catch (S3Exception missing) {
+                if (missing.statusCode() != 404) throw missing;
+            }
+            if (request.metadata().size() > 29) {
+                throw new IllegalArgumentException("delegated S3 upload metadata exceeds 29 entries");
+            }
+            Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
+            metadata.put("tpf.delegated.sha256", request.sha256());
+            metadata.put("tpf.delegated.bytes", Long.toString(request.bytes()));
+            metadata.put("tpf.delegated.target", request.targetName());
+            String uploadId = s3.createMultipartUpload(CreateMultipartUploadRequest.builder()
+                .bucket(bucket).key(key).contentType(request.contentType()).metadata(metadata).build()).uploadId();
+            try {
+                var claims = new S3DelegatedUploadToken.Claims(request.targetName(), bucket, key, uploadId,
+                    request.contentType(), request.bytes(), partSizeBytes, request.sha256(), request.expiresAt(),
+                    request.idempotencyKey(), metadata);
+                String token = delegatedTokens.issue(claims);
+                s3.putObject(PutObjectRequest.builder().bucket(bucket).key(markerKey).ifNoneMatch("*")
+                    .contentType("text/plain").build(), RequestBody.fromString(token));
+                return new Reservation(token, partSizeBytes, request.expiresAt());
+            } catch (S3Exception conflict) {
+                abortNewReservation(s3, bucket, key, uploadId, conflict);
+                if (conflict.statusCode() == 412) {
+                    return reusedReservation(s3, bucket, markerKey, request);
+                }
+                throw conflict;
+            } catch (RuntimeException failure) {
+                abortNewReservation(s3, bucket, key, uploadId, failure);
+                throw failure;
+            }
+        }, executor);
+    }
+
+    private static void abortNewReservation(S3Client s3, String bucket, String key, String uploadId,
+                                            RuntimeException failure) {
+        try {
+            s3.abortMultipartUpload(AbortMultipartUploadRequest.builder().bucket(bucket).key(key)
+                .uploadId(uploadId).build());
+        } catch (RuntimeException abortFailure) {
+            failure.addSuppressed(abortFailure);
+        }
+    }
+
+    private Reservation reusedReservation(S3Client s3, String bucket, String markerKey,
+                                          DelegatedPayloadTarget.Request request) {
+        var stored = s3.getObjectAsBytes(GetObjectRequest.builder().bucket(bucket).key(markerKey).build());
+        String token = stored.asString(StandardCharsets.UTF_8);
+        var claims = delegatedTokens.inspect(token);
+        String uploadsPrefix = objectKey(new ObjectWriteOpenRequest(request.targetName(), request.target(),
+            "uploads/", request.contentType(), Map.of(), request.idempotencyKey()));
+        if (!claims.targetName().equals(request.targetName())
+            || !claims.bucket().equals(bucket) || !claims.key().startsWith(uploadsPrefix)
+            || !claims.contentType().equals(request.contentType())
+            || claims.bytes() != request.bytes() || !claims.sha256().equals(request.sha256())
+            || !claims.idempotencyKey().equals(request.idempotencyKey())
+            || !request.metadata().entrySet().stream().allMatch(entry ->
+                entry.getValue().equals(claims.metadata().get(entry.getKey())))) {
+            throw new SecurityException("idempotency key was used for another upload reservation");
+        }
+        if (!claims.expiresAt().isAfter(Instant.now())) {
+            try {
+                s3.abortMultipartUpload(AbortMultipartUploadRequest.builder().bucket(bucket)
+                    .key(claims.key()).uploadId(claims.uploadId()).build());
+            } catch (S3Exception failure) {
+                if (failure.statusCode() != 404) throw failure;
+            }
+            s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(markerKey)
+                .ifMatch('"' + requireEtag(stored.response().eTag()) + '"').build());
+            throw S3Exception.builder().statusCode(404).message("expired reservation removed").build();
+        }
+        return new Reservation(token, claims.partSizeBytes(), claims.expiresAt());
+    }
+
+    private String delegatedMarkerKey(ObjectWriteOpenRequest request, String idempotencyKey) {
+        MessageDigest digest = S3WriteSession.sha256Digest();
+        digest.update(request.targetName().getBytes(StandardCharsets.UTF_8));
+        request.metadata().entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
+            digest.update(entry.getKey().getBytes(StandardCharsets.UTF_8));
+            digest.update(entry.getValue().getBytes(StandardCharsets.UTF_8));
+        });
+        digest.update(idempotencyKey.getBytes(StandardCharsets.UTF_8));
+        return objectKey(new ObjectWriteOpenRequest(request.targetName(), request.target(),
+            ".tpf-delegated/" + HexFormat.of().formatHex(digest.digest()) + ".reservation",
+            "text/plain", Map.of(), idempotencyKey));
+    }
+
+    @Override
+    public CompletionStage<PartCapability> part(PipelineObjectPublishConfig target, String token,
+                                                 Map<String, String> expectedOwner, int partNumber) {
+        return CompletableFuture.supplyAsync(() -> {
+            var claims = verifiedDelegated(target, token, expectedOwner);
+            long count = (claims.bytes() + claims.partSizeBytes() - 1) / claims.partSizeBytes();
+            if (partNumber < 1 || partNumber > count || partNumber > 10_000) {
+                throw new IllegalArgumentException("S3 upload part number is outside reservation");
+            }
+            ObjectWriteOpenRequest open = delegatedOpen(target, claims);
+            S3Client s3 = client(open);
+            S3Presigner presigner = presigner(s3,
+                Boolean.parseBoolean(location(target, "pathStyleAccess").orElse("false")));
+            java.time.Duration duration = java.time.Duration.between(Instant.now(), claims.expiresAt());
+            if (duration.compareTo(java.time.Duration.ofMinutes(10)) > 0) {
+                duration = java.time.Duration.ofMinutes(10);
+            }
+            var signed = presigner.presignUploadPart(UploadPartPresignRequest.builder()
+                .signatureDuration(duration)
+                .uploadPartRequest(UploadPartRequest.builder().bucket(claims.bucket()).key(claims.key())
+                    .uploadId(claims.uploadId()).partNumber(partNumber).build())
+                .build());
+            return new PartCapability(signed.url().toExternalForm(), signed.signedHeaders().entrySet().stream()
+                .filter(entry -> !entry.getKey().equalsIgnoreCase("host"))
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey,
+                    entry -> String.join(",", entry.getValue()))),
+                Instant.now().plus(duration));
+        }, executor);
+    }
+
+    @Override
+    public CompletionStage<ObjectWriteResult> complete(PipelineObjectPublishConfig target, String token,
+                                                       Map<String, String> expectedOwner) {
+        return CompletableFuture.supplyAsync(() -> completeDelegated(target,
+            verifiedDelegated(target, token, expectedOwner)), executor);
+    }
+
+    @Override
+    public CompletionStage<Void> abort(PipelineObjectPublishConfig target, String token,
+                                       Map<String, String> expectedOwner) {
+        return CompletableFuture.runAsync(() -> {
+            var claims = verifiedDelegated(target, token, expectedOwner);
+            S3Client s3 = client(delegatedOpen(target, claims));
+            try {
+                s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                    .bucket(claims.bucket()).key(claims.key()).uploadId(claims.uploadId()).build());
+            } catch (S3Exception failure) {
+                if (failure.statusCode() != 404) throw failure;
+            }
+        }, executor);
+    }
+
+    private S3DelegatedUploadToken.Claims verifiedDelegated(PipelineObjectPublishConfig target, String token,
+                                                             Map<String, String> expectedOwner) {
+        var claims = delegatedTokens.verify(token, Instant.now());
+        ObjectWriteOpenRequest open = delegatedOpen(target, claims);
+        if (!claims.targetName().equals(target.name()) || !required(open, "bucket").equals(claims.bucket())
+            || !claims.key().startsWith(objectKey(new ObjectWriteOpenRequest(target.name(), target,
+                "uploads/", claims.contentType(), Map.of(), claims.uploadId())))
+            || !expectedOwner.entrySet().stream().allMatch(entry ->
+                entry.getValue().equals(claims.metadata().get(entry.getKey())))) {
+            throw new SecurityException("S3 upload reservation does not match this target and owner");
+        }
+        return claims;
+    }
+
+    private ObjectWriteOpenRequest delegatedOpen(PipelineObjectPublishConfig target,
+                                                  S3DelegatedUploadToken.Claims claims) {
+        return new ObjectWriteOpenRequest(target.name(), target, claims.key(), claims.contentType(),
+            claims.metadata(), claims.uploadId());
+    }
+
+    private ObjectWriteResult completeDelegated(PipelineObjectPublishConfig target,
+                                                 S3DelegatedUploadToken.Claims claims) {
+        S3Client s3 = client(delegatedOpen(target, claims));
+        boolean existing = false;
+        String completedEtag = null;
+        try {
+            var head = s3.headObject(HeadObjectRequest.builder().bucket(claims.bucket())
+                .key(claims.key()).build());
+            existing = true;
+            if (head.contentLength() == null || head.contentLength() != claims.bytes()
+                || !claims.contentType().equals(head.contentType())
+                || !claims.metadata().entrySet().stream().allMatch(entry ->
+                    entry.getValue().equals(head.metadata().get(entry.getKey())))) {
+                throw new SecurityException("completed S3 upload metadata does not match reservation");
+            }
+            completedEtag = requireEtag(head.eTag());
+        } catch (S3Exception failure) {
+            if (failure.statusCode() != 404) throw failure;
+        }
+        if (!existing) {
+            List<CompletedPart> parts = new ArrayList<>();
+            long total = 0;
+            int marker = 0;
+            int expectedPart = 1;
+            while (true) {
+                var listing = ListPartsRequest.builder().bucket(claims.bucket())
+                    .key(claims.key()).uploadId(claims.uploadId());
+                if (marker > 0) listing.partNumberMarker(marker);
+                var listed = s3.listParts(listing.build());
+                for (var part : listed.parts()) {
+                    if (part.partNumber() != expectedPart++ || part.size() == null
+                        || part.size() < 1 || part.size() > claims.partSizeBytes()
+                        || (total + part.size() < claims.bytes() && part.size() != claims.partSizeBytes())) {
+                        throw new SecurityException("S3 upload has invalid or missing parts");
+                    }
+                    total += part.size();
+                    if (total > claims.bytes()) throw new SecurityException("S3 upload exceeds reserved size");
+                    parts.add(CompletedPart.builder().partNumber(part.partNumber()).eTag(part.eTag()).build());
+                }
+                if (!Boolean.TRUE.equals(listed.isTruncated())) break;
+                marker = listed.nextPartNumberMarker();
+            }
+            if (total != claims.bytes() || parts.isEmpty() || parts.size() > 10_000) {
+                throw new SecurityException("S3 upload is incomplete");
+            }
+            var completed = s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder().bucket(claims.bucket())
+                .key(claims.key()).uploadId(claims.uploadId())
+                .multipartUpload(CompletedMultipartUpload.builder().parts(parts).build()).build());
+            completedEtag = requireEtag(completed.eTag());
+        }
+        MessageDigest digest = S3WriteSession.sha256Digest();
+        long read = 0;
+        try (InputStream input = s3.getObject(GetObjectRequest.builder().bucket(claims.bucket())
+            .key(claims.key()).ifMatch('"' + completedEtag + '"').build(), ResponseTransformer.toInputStream())) {
+            byte[] chunk = new byte[64 * 1024];
+            int count;
+            while ((count = input.read(chunk)) >= 0) {
+                read += count;
+                if (read > claims.bytes()) throw new SecurityException("S3 upload exceeds reserved size");
+                digest.update(chunk, 0, count);
+            }
+        } catch (IOException failure) {
+            if (!existing) deleteUnverified(s3, claims, failure);
+            throw new IllegalStateException("could not verify completed S3 upload", failure);
+        } catch (RuntimeException failure) {
+            if (!existing) deleteUnverified(s3, claims, failure);
+            throw failure;
+        }
+        String actual = HexFormat.of().formatHex(digest.digest());
+        if (read != claims.bytes() || !actual.equals(claims.sha256())) {
+            SecurityException failure = new SecurityException("S3 upload size or SHA-256 differs from reservation");
+            deleteUnverified(s3, claims, failure);
+            throw failure;
+        }
+        Map<String, String> metadata = new LinkedHashMap<>(claims.metadata());
+        metadata.put("target", claims.targetName());
+        metadata.put(S3ObjectSourceProvider.CHECKSUM_KIND_METADATA,
+            S3ObjectSourceProvider.CHECKSUM_KIND_SHA256);
+        metadata.put(S3ObjectSourceProvider.ORIGINAL_ETAG_METADATA, completedEtag);
+        location(target, "region").ifPresent(region -> metadata.put(S3ObjectSourceProvider.REGION_METADATA, region));
+        location(target, "pathStyleAccess").ifPresent(pathStyle ->
+            metadata.put(S3ObjectSourceProvider.PATH_STYLE_METADATA, pathStyle));
+        PayloadReference reference = authority.issue(new PayloadReference("s3", claims.bucket(), claims.key(),
+            claims.contentType(), "raw", actual, read, null, metadata, Optional.empty()));
+        return new ObjectWriteResult(reference, read, actual, Instant.now());
+    }
+
+    private static void deleteUnverified(S3Client s3, S3DelegatedUploadToken.Claims claims,
+                                         Throwable failure) {
+        try {
+            s3.deleteObject(DeleteObjectRequest.builder().bucket(claims.bucket()).key(claims.key()).build());
+        } catch (RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+        }
     }
 
     @Override
@@ -194,6 +479,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
             .metadata(request.metadata())
             .build());
         List<CompletedPart> completedParts = new ArrayList<>();
+        String completedEtag;
         try (InputStream composite = new java.security.DigestInputStream(
             new S3PartSequenceInputStream(s3, bucket, request.prefix(), physicalParts, request.suffix()), digest)) {
             int partNumber = 1;
@@ -211,14 +497,14 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
             if (completedParts.isEmpty()) {
                 s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
                     .bucket(bucket).key(finalKey).uploadId(created.uploadId()).build());
-                s3.putObject(PutObjectRequest.builder()
+                completedEtag = requireEtag(s3.putObject(PutObjectRequest.builder()
                         .bucket(bucket).key(finalKey).contentType(request.contentType()).metadata(request.metadata()).build(),
-                    RequestBody.empty());
+                    RequestBody.empty()).eTag());
             } else {
-                s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                completedEtag = requireEtag(s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
                     .bucket(bucket).key(finalKey).uploadId(created.uploadId())
                     .multipartUpload(CompletedMultipartUpload.builder().parts(completedParts).build())
-                    .build());
+                    .build()).eTag());
             }
         } catch (IOException | RuntimeException failure) {
             try {
@@ -236,8 +522,11 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
         Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
         metadata.put("target", request.targetName());
         metadata.put(S3ObjectSourceProvider.CHECKSUM_KIND_METADATA, S3ObjectSourceProvider.CHECKSUM_KIND_SHA256);
+        metadata.put(S3ObjectSourceProvider.ORIGINAL_ETAG_METADATA, completedEtag);
         location(request.target(), "region")
             .ifPresent(region -> metadata.put(S3ObjectSourceProvider.REGION_METADATA, region));
+        location(request.target(), "pathStyleAccess").ifPresent(pathStyle ->
+            metadata.put(S3ObjectSourceProvider.PATH_STYLE_METADATA, pathStyle));
         PayloadReference reference = authority.issue(new PayloadReference(
             "s3", bucket, finalKey, request.contentType(), "raw", checksum, totalBytes,
             null, metadata, Optional.empty()));
@@ -250,6 +539,16 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
             throw new IllegalStateException("Paged S3 part is missing metadata: " + key);
         }
         return value;
+    }
+
+    private static String requireEtag(String value) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException("S3 completed object has no ETag");
+        }
+        String normalized = value.startsWith("\"") && value.endsWith("\"")
+            ? value.substring(1, value.length() - 1) : value;
+        if (normalized.isBlank()) throw new IllegalStateException("S3 completed object has no ETag");
+        return normalized;
     }
 
     private static final class S3PartSequenceInputStream extends InputStream {
@@ -313,6 +612,8 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
                 resolvedClients.values().forEach(S3Client::close);
                 resolvedClients.clear();
             }
+            presigners.values().forEach(S3Presigner::close);
+            presigners.clear();
         }
         if (ownsExecutor && executor instanceof ExecutorService executorService) {
             executorService.close();
@@ -326,6 +627,14 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
                 throw new IllegalStateException("S3 object target provider is closed");
             }
             return client.orElseGet(() -> resolvedClient(request));
+        }
+    }
+
+    private S3Presigner presigner(S3Client s3, boolean pathStyleAccess) {
+        synchronized (lifecycleLock) {
+            if (closed) throw new IllegalStateException("S3 object target provider is closed");
+            return presigners.computeIfAbsent(new PresignerConfiguration(s3, pathStyleAccess),
+                configuration -> S3Presigners.forClient(configuration.client(), configuration.pathStyleAccess()));
         }
     }
 
@@ -451,24 +760,25 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
                 if (buffer.size() > 0) {
                     uploadBufferedPart(buffer.size());
                 }
+                String completedEtag;
                 if (parts.isEmpty()) {
                     client.abortMultipartUpload(abortRequest());
-                    client.putObject(
+                    completedEtag = requireEtag(client.putObject(
                         PutObjectRequest.builder()
                             .bucket(bucket)
                             .key(key)
                             .contentType(request.contentType())
                             .metadata(request.metadata())
                             .build(),
-                        RequestBody.empty());
+                        RequestBody.empty()).eTag());
                 } else {
-                    client.completeMultipartUpload(
+                    completedEtag = requireEtag(client.completeMultipartUpload(
                         CompleteMultipartUploadRequest.builder()
                             .bucket(bucket)
                             .key(key)
                             .uploadId(uploadId)
                             .multipartUpload(CompletedMultipartUpload.builder().parts(parts).build())
-                            .build());
+                            .build()).eTag());
                 }
                 completed = true;
                 Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
@@ -477,8 +787,11 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, AutoCl
                 metadata.put(
                     S3ObjectSourceProvider.CHECKSUM_KIND_METADATA,
                     S3ObjectSourceProvider.CHECKSUM_KIND_SHA256);
+                metadata.put(S3ObjectSourceProvider.ORIGINAL_ETAG_METADATA, completedEtag);
                 location(request.target(), "region")
                     .ifPresent(region -> metadata.put(S3ObjectSourceProvider.REGION_METADATA, region));
+                location(request.target(), "pathStyleAccess").ifPresent(pathStyle ->
+                    metadata.put(S3ObjectSourceProvider.PATH_STYLE_METADATA, pathStyle));
                 PayloadReference reference = authority.issue(new PayloadReference(
                     "s3",
                     bucket,
