@@ -265,10 +265,12 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
             if (duration.compareTo(java.time.Duration.ofMinutes(10)) > 0) {
                 duration = java.time.Duration.ofMinutes(10);
             }
+            long reservedPartBytes = Math.min(claims.partSizeBytes(),
+                claims.bytes() - (partNumber - 1L) * claims.partSizeBytes());
             var signed = presigner.presignUploadPart(UploadPartPresignRequest.builder()
                 .signatureDuration(duration)
                 .uploadPartRequest(UploadPartRequest.builder().bucket(claims.bucket()).key(claims.key())
-                    .uploadId(claims.uploadId()).partNumber(partNumber).build())
+                    .uploadId(claims.uploadId()).partNumber(partNumber).contentLength(reservedPartBytes).build())
                 .build());
             return new PartCapability(signed.url().toExternalForm(), signed.signedHeaders().entrySet().stream()
                 .filter(entry -> !entry.getKey().equalsIgnoreCase("host"))
