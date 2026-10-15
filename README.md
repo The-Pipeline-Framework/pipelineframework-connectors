@@ -31,6 +31,7 @@ claim of testing commercial providers against live accounts.
 Use the `central-publishing` profile only to sign and deploy the canonical reactor. For authoring guidance, see
 [Connectors](https://pipelineframework.org/develop/connectors/); for the component boundary, see
 [TPF Components and Repositories](https://github.com/The-Pipeline-Framework/pipelineframework/blob/main/docs/architecture/components-and-repositories.md).
+For contributor roles, code map, and verification choices, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## System-test candidates
 
