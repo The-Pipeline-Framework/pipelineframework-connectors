@@ -32,6 +32,7 @@ import org.pipelineframework.representation.http.HttpRepresentationBindings;
 @Path("/" + CommandDeferredCompletionSupport.CALLBACK_PATH + "{token}")
 public class ProviderCallbackResource {
     private static final int MAX_BODY = 1_048_576;
+    private static final System.Logger LOG = System.getLogger(ProviderCallbackResource.class.getName());
     private final java.util.Map<ClassLoader, CallbackArtifacts> catalogues = new java.util.concurrent.ConcurrentHashMap<>();
     @Inject AwaitCoordinator coordinator;
     @Inject PipelineExecutionService executions;
@@ -56,6 +57,7 @@ public class ProviderCallbackResource {
         } catch (java.io.IOException | IllegalArgumentException failure) {
             return rejected();
         } catch (RuntimeException failure) {
+            LOG.log(System.Logger.Level.WARNING, "Callback request unavailable while reading the body", failure);
             return unavailable();
         }
         ClassLoader loader = Thread.currentThread().getContextClassLoader();
@@ -73,6 +75,7 @@ public class ProviderCallbackResource {
         var descriptor = coordinator.callbackDescriptor(record);
         var selection = descriptor.callback().orElseThrow();
         if (!"http.client".equals(selection.operation().providerId().value()) || selection.providerMajorVersion() != 1) {
+            LOG.log(System.Logger.Level.WARNING, "Callback operation provider or version is unavailable");
             return unavailable();
         }
         var catalogue = artifacts(loader).operations();
@@ -120,6 +123,7 @@ public class ProviderCallbackResource {
             callbackType = Class.forName(descriptor.transportOutputType(), false, loader);
             representations = artifacts(loader).representations();
         } catch (Exception failure) {
+            LOG.log(System.Logger.Level.WARNING, "Callback transport type or representation is unavailable", failure);
             return unavailable();
         }
         Object canonical;
@@ -129,8 +133,12 @@ public class ProviderCallbackResource {
             HttpWireValueValidator.validate(Objects.requireNonNull(wire), pin.requestSchema());
             canonical = representations.fromWire(pin.requestMappingKey(), wire, callbackType);
         } catch (Exception failure) {
-            return failure instanceof IllegalArgumentException || failure instanceof com.fasterxml.jackson.core.JsonProcessingException
-                || failure.getCause() instanceof com.fasterxml.jackson.core.JsonProcessingException ? rejected() : unavailable();
+            if (failure instanceof IllegalArgumentException || failure instanceof com.fasterxml.jackson.core.JsonProcessingException
+                || failure.getCause() instanceof com.fasterxml.jackson.core.JsonProcessingException) {
+                return rejected();
+            }
+            LOG.log(System.Logger.Level.WARNING, "Callback representation mapping is unavailable", failure);
+            return unavailable();
         }
         return executions.completeAwaitInteraction(new AwaitCompletionCommand(record.tenantId(), record.interactionId(),
             record.correlationId(), token, "callback:" + pin.id(), canonical, actor.value(), System.currentTimeMillis()))
@@ -143,7 +151,11 @@ public class ProviderCallbackResource {
             || classified instanceof java.util.concurrent.ExecutionException) && classified.getCause() != null; depth++) {
             classified = classified.getCause();
         }
-        return Response.status(classified instanceof AwaitCompletionAdmissionFailure ? 400 : 503).build();
+        if (classified instanceof AwaitCompletionAdmissionFailure) {
+            return Response.status(400).build();
+        }
+        LOG.log(System.Logger.Level.WARNING, "Callback completion is unavailable", classified);
+        return Response.status(503).build();
     }
 
     private Uni<Response> unavailable() {
