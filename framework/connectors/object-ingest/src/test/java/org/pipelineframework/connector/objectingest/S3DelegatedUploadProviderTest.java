@@ -119,6 +119,44 @@ class S3DelegatedUploadProviderTest {
     }
 
     @Test
+    void partCapabilitiesSignTheExactReservedLengthIncludingTheFinalPart() {
+        S3Client client = mock(S3Client.class);
+        S3ServiceClientConfiguration configuration = mock(S3ServiceClientConfiguration.class);
+        when(configuration.region()).thenReturn(Region.EU_WEST_1);
+        doReturn(StaticCredentialsProvider.create(AwsBasicCredentials.create("test-access-key", "test-secret-key")))
+            .when(configuration).credentialsProvider();
+        when(configuration.endpointOverride()).thenReturn(Optional.of(URI.create("http://localhost:4566")));
+        when(client.serviceClientConfiguration()).thenReturn(configuration);
+        PipelineObjectPublishConfig target = new PipelineObjectPublishConfig("invoices", "object", "s3",
+            Optional.of("objects"), Map.of("bucket", "payloads", "prefix", "invoices", "region", "eu-west-1"),
+            org.pipelineframework.config.boundary.PipelineObjectNamingConfig.defaults(),
+            org.pipelineframework.config.boundary.PipelineObjectPublishPayloadConfig.defaults(),
+            org.pipelineframework.config.boundary.PipelineObjectPublishGroupingConfig.defaults());
+        Map<String, String> owner = Map.of("owner", "tenant-a");
+        // Assert the actual AWS SDK signature surface, not merely the request builder input.
+        Map<Long, java.util.List<String>> cases = Map.of(
+            83L, java.util.List.of("83"),
+            6_000_000L, java.util.List.of("5242880", "757120"),
+            10_485_760L, java.util.List.of("5242880", "5242880"));
+        try (var provider = new S3ObjectTargetProvider(client, Runnable::run, 5 * 1024 * 1024)) {
+            cases.forEach((bytes, lengths) -> {
+                String token = new S3DelegatedUploadToken().issue(new S3DelegatedUploadToken.Claims(
+                    "invoices", "payloads", "invoices/uploads/reserved", "upload-1", "application/pdf",
+                    bytes, 5 * 1024 * 1024, "a".repeat(64), Instant.now().plusSeconds(900), "retry-1", owner));
+                for (int index = 0; index < lengths.size(); index++) {
+                    var part = provider.part(target, token, owner, index + 1).toCompletableFuture().join();
+                    assertEquals(lengths.get(index), part.headers().get("content-length"));
+                    assertTrue(java.net.URLDecoder.decode(part.url(), java.nio.charset.StandardCharsets.UTF_8)
+                        .contains("X-Amz-SignedHeaders=content-length;host"));
+                }
+                assertThrows(CompletionException.class, () -> provider.part(target, token, owner,
+                    lengths.size() + 1).toCompletableFuture().join());
+            });
+        }
+        verify(client, never()).createMultipartUpload(any(CreateMultipartUploadRequest.class));
+    }
+
+    @Test
     void expiredReservationIsAbortedAndRemovedBeforeReusingIdempotencyKey() {
         S3Client client = mock(S3Client.class);
         Map<String, String> owner = Map.of("owner", "tenant-a");

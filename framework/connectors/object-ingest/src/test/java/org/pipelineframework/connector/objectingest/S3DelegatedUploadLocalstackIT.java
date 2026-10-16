@@ -125,7 +125,11 @@ class S3DelegatedUploadLocalstackIT {
         throws Exception {
         HttpRequest.Builder put = HttpRequest.newBuilder(URI.create(capability.url()))
             .PUT(HttpRequest.BodyPublishers.ofByteArray(bytes));
-        capability.headers().forEach(put::header);
+        capability.headers().forEach((name, value) -> {
+            // Java HttpClient derives this restricted header from the body publisher.
+            if (name.equalsIgnoreCase("content-length")) assertEquals(bytes.length, Long.parseLong(value));
+            else put.header(name, value);
+        });
         var response = http.send(put.build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode(), capability.url() + " " + response.body());
     }
