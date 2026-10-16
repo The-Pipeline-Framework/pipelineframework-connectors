@@ -13,6 +13,11 @@ This repository owns TPF Connector implementations, import tooling, representati
 TPF-owned authorized external-service hosts. A Connector models typed admission, publication, external observation,
 or external effect; it is not a generic plugin or a second Pipeline language.
 
+For contribution intake, module map, and focused verification examples, see [CONTRIBUTING.md](CONTRIBUTING.md).
+This guide routes contributors; the boundary and release rules in this file remain authoritative.
+User-facing connector documentation remains on the canonical site in `pipelineframework/docs`; do not turn
+this repository's contribution guide into a parallel semantic or usage manual.
+
 ## Boundary
 
 - Consume semantic, compiler, and runtime seams as released artifacts. Do not copy their source or redefine their

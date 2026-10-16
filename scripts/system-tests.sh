@@ -5,6 +5,7 @@ read -r -a maven_args <<< "${MAVEN_ARGS:-}" || true
 case "${1:-}" in
   verify)
     ./mvnw -B ${maven_args[@]+"${maven_args[@]}"} \
+      -Dmaven.repo.local="$PWD/.m2/repository" \
       -Dmaven.deploy.skip=true -Dgpg.skip=true -Dtpf.flatten.skip=true clean verify
     python3 scripts/verify-service-integration-reports.py
     ;;

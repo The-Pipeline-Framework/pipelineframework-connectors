@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import shutil
@@ -14,9 +15,9 @@ spec.loader.exec_module(evidence)
 
 class IntegrationEvidenceTest(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
+        self.directory = tempfile.TemporaryDirectory(prefix="connector evidence ")
         self.addCleanup(self.directory.cleanup)
-        self.root = Path(self.directory.name)
+        self.root = Path(self.directory.name).resolve()
         self.reports = []
         for module, name in evidence.REQUIRED_SUITES.items():
             report = self.root / module / "target/failsafe-reports" / f"TEST-{name}.xml"
@@ -78,6 +79,34 @@ class IntegrationEvidenceTest(unittest.TestCase):
         report.write_text(f'<testsuite name="{name}" tests="0" failures="0" errors="0" skipped="0"/>')
         with self.assertRaisesRegex(ValueError, 'Missing passing'):
             evidence.verify(self.root)
+
+    def test_owner_entrypoint_uses_local_cache_and_preserves_maven_arguments(self):
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        for name in ("system-tests.sh", "verify-service-integration-reports.py"):
+            shutil.copyfile(Path(__file__).with_name(name), scripts / name)
+        wrapper = self.root / "mvnw"
+        wrapper.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > maven-arguments\n')
+        wrapper.chmod(0o755)
+        for supplied in (None, "", "-Dmarker=retained -DskipUnitTests=false",
+                         "-Dmaven.repo.local=/unrelated/cache -Dmarker=retained"):
+            with self.subTest(maven_args=supplied):
+                environment = os.environ.copy()
+                environment.pop("MAVEN_ARGS", None)
+                if supplied is not None:
+                    environment["MAVEN_ARGS"] = supplied
+                result = subprocess.run(["bash", "scripts/system-tests.sh", "verify"],
+                                        cwd=self.root, env=environment, capture_output=True, text=True)
+                self.assertEqual(0, result.returncode, result.stderr)
+                arguments = (self.root / "maven-arguments").read_text().splitlines()
+                repositories = [arg for arg in arguments if arg.startswith("-Dmaven.repo.local=")]
+                self.assertTrue(repositories, "entrypoint must select an isolated Maven repository")
+                self.assertEqual(f"-Dmaven.repo.local={self.root}/.m2/repository", repositories[-1])
+                caller_arguments = supplied.split() if supplied else []
+                self.assertEqual(caller_arguments, arguments[1:1 + len(caller_arguments)])
+                self.assertEqual("-B", arguments[0])
+                self.assertEqual(["-Dmaven.deploy.skip=true", "-Dgpg.skip=true",
+                                  "-Dtpf.flatten.skip=true", "clean", "verify"], arguments[-5:])
 
     def test_owner_entrypoint_requires_evidence_after_clean_verify(self):
         scripts = self.root / "scripts"
