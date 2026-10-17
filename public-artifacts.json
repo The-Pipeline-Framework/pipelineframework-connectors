@@ -4,6 +4,7 @@
     {"artifactId": "pipelineframework-connectors-parent", "packaging": "pom"},
     {"artifactId": "http-contract", "packaging": "jar"},
     {"artifactId": "representation-provider-opencsv", "packaging": "jar"},
+    {"artifactId": "conversation-context-connector", "packaging": "jar"},
     {"artifactId": "object-ingest-connector", "packaging": "jar"},
     {"artifactId": "query-jpa-connector", "packaging": "jar"},
     {"artifactId": "query-hibernate-common", "packaging": "jar"},
