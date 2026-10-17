@@ -83,7 +83,7 @@ class IntegrationEvidenceTest(unittest.TestCase):
     def test_owner_entrypoint_uses_local_cache_and_preserves_maven_arguments(self):
         scripts = self.root / "scripts"
         scripts.mkdir()
-        for name in ("system-tests.sh", "verify-service-integration-reports.py"):
+        for name in ("system-tests.sh", "test-system-tests-arguments.py", "verify-service-integration-reports.py"):
             shutil.copyfile(Path(__file__).with_name(name), scripts / name)
         wrapper = self.root / "mvnw"
         wrapper.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > maven-arguments\n')
@@ -101,8 +101,11 @@ class IntegrationEvidenceTest(unittest.TestCase):
                 arguments = (self.root / "maven-arguments").read_text().splitlines()
                 repositories = [arg for arg in arguments if arg.startswith("-Dmaven.repo.local=")]
                 self.assertTrue(repositories, "entrypoint must select an isolated Maven repository")
-                self.assertEqual(f"-Dmaven.repo.local={self.root}/.m2/repository", repositories[-1])
                 caller_arguments = supplied.split() if supplied else []
+                caller_repositories = [arg for arg in caller_arguments if arg.startswith("-Dmaven.repo.local=")]
+                expected_repository = (caller_repositories[-1] if caller_repositories
+                                       else f"-Dmaven.repo.local={self.root}/.m2/repository")
+                self.assertEqual([expected_repository], repositories)
                 self.assertEqual(caller_arguments, arguments[1:1 + len(caller_arguments)])
                 self.assertEqual("-B", arguments[0])
                 self.assertEqual(["-Dmaven.deploy.skip=true", "-Dgpg.skip=true",
@@ -111,7 +114,7 @@ class IntegrationEvidenceTest(unittest.TestCase):
     def test_owner_entrypoint_requires_evidence_after_clean_verify(self):
         scripts = self.root / "scripts"
         scripts.mkdir()
-        for name in ("system-tests.sh", "verify-service-integration-reports.py"):
+        for name in ("system-tests.sh", "test-system-tests-arguments.py", "verify-service-integration-reports.py"):
             shutil.copyfile(Path(__file__).with_name(name), scripts / name)
         wrapper = self.root / "mvnw"
         wrapper.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > maven-arguments\n')
