@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/xsd/maven-4.0.0.xsd https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent><groupId>org.pipelineframework</groupId><artifactId>pipelineframework-connectors-parent</artifactId><version>26.10.1-SNAPSHOT</version><relativePath>../../../pom.xml</relativePath></parent>
+    <artifactId>conversation-context-connector</artifactId>
+    <properties><maven.deploy.skip>false</maven.deploy.skip></properties>
+    <name>The Pipeline Framework - Portable Conversation Context</name>
+    <description>Contributed conversation protocol and deterministic context assembly.</description>
+    <dependencies>
+        <dependency><groupId>org.pipelineframework</groupId><artifactId>pipelineframework-runtime-core</artifactId><version>${pipelineframework.contracts.version}</version></dependency>
+        <dependency><groupId>org.pipelineframework</groupId><artifactId>pipelineframework-semantic-model</artifactId><version>${pipelineframework.contracts.version}</version></dependency>
+        <dependency><groupId>org.pipelineframework</groupId><artifactId>pipelineframework-compiler</artifactId><version>${pipelineframework.compiler.version}</version><scope>test</scope></dependency>
+        <dependency><groupId>io.smallrye.reactive</groupId><artifactId>mutiny</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter-api</artifactId><scope>test</scope></dependency>
+        <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter-engine</artifactId><scope>test</scope></dependency>
+    </dependencies>
+    <build><plugins><plugin><groupId>com.diffplug.spotless</groupId><artifactId>spotless-maven-plugin</artifactId></plugin></plugins></build>
+</project>
