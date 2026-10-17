@@ -4,8 +4,16 @@ read -r -a maven_args <<< "${MAVEN_ARGS:-}" || true
 
 case "${1:-}" in
   verify)
+    python3 scripts/test-system-tests-arguments.py
+    repository_args=("-Dmaven.repo.local=$PWD/.m2/repository")
+    for argument in ${maven_args[@]+"${maven_args[@]}"}; do
+      if [[ "$argument" == -Dmaven.repo.local=* ]]; then
+        repository_args=()
+        break
+      fi
+    done
     ./mvnw -B ${maven_args[@]+"${maven_args[@]}"} \
-      -Dmaven.repo.local="$PWD/.m2/repository" \
+      ${repository_args[@]+"${repository_args[@]}"} \
       -Dmaven.deploy.skip=true -Dgpg.skip=true -Dtpf.flatten.skip=true clean verify
     python3 scripts/verify-service-integration-reports.py
     ;;
