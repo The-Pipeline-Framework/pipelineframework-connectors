@@ -13,8 +13,8 @@ public record ConversationTurn(
     public ConversationTurn {
         scope = Objects.requireNonNull(scope, "scope must not be null");
         eventId = ConversationValues.identifier(eventId, "event ID");
-        if (cursor == null || cursor < 0) {
-            throw new IllegalArgumentException("cursor must be non-negative");
+        if (cursor == null || cursor <= 0) {
+            throw new IllegalArgumentException("cursor must be positive");
         }
         occurredAt = ConversationValues.identifier(occurredAt, "timestamp");
         try {

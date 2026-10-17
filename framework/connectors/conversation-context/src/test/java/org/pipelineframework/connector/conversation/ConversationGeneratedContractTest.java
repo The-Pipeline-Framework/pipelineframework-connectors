@@ -1,5 +1,6 @@
 package org.pipelineframework.connector.conversation;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
@@ -67,13 +68,19 @@ class ConversationGeneratedContractTest {
         Files.copy(Path.of("src/test/resources/conversation-type-proof.yaml"), fixture);
         Path java = temporary.resolve("generated-domain");
         Path protobuf = temporary.resolve("generated-proto");
+        String previousBootstrap = System.getProperty("pipeline.idl.bootstrap");
         System.setProperty("pipeline.idl.bootstrap", "true");
         try {
             new PipelineProtoGenerator().generate(temporary, fixture, protobuf);
             new PipelineJavaDomainGenerator().generate(temporary, Optional.of(fixture), Optional.of(java));
         } finally {
-            System.clearProperty("pipeline.idl.bootstrap");
+            if (previousBootstrap == null) {
+                System.clearProperty("pipeline.idl.bootstrap");
+            } else {
+                System.setProperty("pipeline.idl.bootstrap", previousBootstrap);
+            }
         }
+        assertEquals(previousBootstrap, System.getProperty("pipeline.idl.bootstrap"));
         var javaSources = Files.walk(java).filter(path -> path.toString().endsWith(".java")).toList();
         Path state = javaSources.stream().filter(path -> path.getFileName().toString().equals("TurnState.java"))
             .findFirst().orElseThrow();

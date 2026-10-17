@@ -23,6 +23,9 @@ class ConversationContextTest {
         assertThrows(IllegalArgumentException.class, () -> new ConversationScope(" ", "owner", "conversation"));
         assertThrows(IllegalArgumentException.class, () -> new ConversationScope("tenant\nother", "owner", "conversation"));
         assertThrows(NullPointerException.class, () -> turn(null, "one", 1));
+        assertEquals("cursor must be positive",
+            assertThrows(IllegalArgumentException.class, () -> turn(scope, "zero", 0)).getMessage());
+        assertThrows(IllegalArgumentException.class, () -> turn(scope, "negative", -1));
         assertThrows(IllegalArgumentException.class, () -> new HistoryReadRequest(scope, -1L, 10));
         assertThrows(IllegalArgumentException.class, () -> new HistoryReadRequest(scope, 0L, 201));
         assertThrows(IllegalArgumentException.class, () -> new HistoryTailRequest(scope, -1L, 10));
