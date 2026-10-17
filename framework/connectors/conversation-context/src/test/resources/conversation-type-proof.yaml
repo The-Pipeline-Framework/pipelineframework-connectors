@@ -1,0 +1,21 @@
+version: 3
+appName: conversation-type-proof
+basePackage: org.pipelineframework.connector.conversation.proof
+transport: LOCAL
+platform: COMPUTE
+contract: { input: TurnState, output: TurnState }
+
+types:
+  TurnState:
+    fields:
+      - [scope, <tpf.conversation.ConversationScope>]
+      - [lastTurn, <tpf.conversation.ConversationTurn>]
+      - [history, <tpf.conversation.HistoryPage>]
+
+steps:
+  - name: Preserve turn
+    service: example.Consumer
+    cardinality: ONE_TO_ONE
+    input: TurnState
+    output: TurnState
+    java: { input: example.TurnState, output: example.TurnState }
