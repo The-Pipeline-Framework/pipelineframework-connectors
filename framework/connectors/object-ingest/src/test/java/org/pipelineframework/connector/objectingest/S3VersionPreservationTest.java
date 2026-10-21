@@ -98,6 +98,21 @@ class S3VersionPreservationTest {
     }
 
     @Test
+    void checksumMismatchOnExistingObjectNeverDeletesAnObservedVersion() {
+        S3Client client = delegatedClient("observed-existing-version", true, true);
+        org.mockito.Mockito.doThrow(S3Exception.builder().statusCode(403).message("denied").build())
+            .when(client).deleteObject(any(DeleteObjectRequest.class));
+        try (var provider = provider(client)) {
+            CompletionException failure = assertThrows(CompletionException.class,
+                () -> provider.complete(target(), token(), OWNER).toCompletableFuture().join());
+            assertEquals(SecurityException.class, failure.getCause().getClass());
+            assertEquals("S3 upload size or SHA-256 differs from reservation", failure.getCause().getMessage());
+        }
+        verify(client, never()).deleteObject(any(DeleteObjectRequest.class));
+        verify(client, never()).completeMultipartUpload(any(CompleteMultipartUploadRequest.class));
+    }
+
+    @Test
     void corruptCompletedVersionCleanupCannotDeleteTheNewerLatestVersion() throws Exception {
         S3Client client = delegatedClient("version-one", false, true);
         try (var provider = provider(client)) {

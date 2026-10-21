@@ -404,7 +404,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
         String actual = HexFormat.of().formatHex(digest.digest());
         if (read != claims.bytes() || !actual.equals(claims.sha256())) {
             SecurityException failure = new SecurityException("S3 upload size or SHA-256 differs from reservation");
-            deleteUnverified(s3, claims, completedVersion, failure);
+            if (!existing) deleteUnverified(s3, claims, completedVersion, failure);
             throw failure;
         }
         Map<String, String> metadata = new LinkedHashMap<>(claims.metadata());
