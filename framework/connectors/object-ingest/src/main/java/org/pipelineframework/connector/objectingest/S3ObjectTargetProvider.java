@@ -327,6 +327,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
         S3Client s3 = client(delegatedOpen(target, claims));
         boolean existing = false;
         String completedEtag = null;
+        String completedVersion = null;
         try {
             var head = s3.headObject(HeadObjectRequest.builder().bucket(claims.bucket())
                 .key(claims.key()).build());
@@ -338,6 +339,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
                 throw new SecurityException("completed S3 upload metadata does not match reservation");
             }
             completedEtag = requireEtag(head.eTag());
+            completedVersion = head.versionId();
         } catch (S3Exception failure) {
             if (failure.statusCode() != 404) throw failure;
         }
@@ -371,11 +373,20 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
                 .key(claims.key()).uploadId(claims.uploadId())
                 .multipartUpload(CompletedMultipartUpload.builder().parts(parts).build()).build());
             completedEtag = requireEtag(completed.eTag());
+            completedVersion = completed.versionId();
+            try {
+                verifyWrittenVersion(s3, claims.bucket(), claims.key(), completedVersion,
+                    completedEtag, claims.bytes(), claims.contentType(), claims.metadata());
+            } catch (RuntimeException failure) {
+                deleteUnverified(s3, claims, completedVersion, failure);
+                throw failure;
+            }
         }
         MessageDigest digest = S3WriteSession.sha256Digest();
         long read = 0;
         try (InputStream input = s3.getObject(GetObjectRequest.builder().bucket(claims.bucket())
-            .key(claims.key()).ifMatch('"' + completedEtag + '"').build(), ResponseTransformer.toInputStream())) {
+            .key(claims.key()).versionId(completedVersion).ifMatch('"' + completedEtag + '"').build(),
+            ResponseTransformer.toInputStream())) {
             byte[] chunk = new byte[64 * 1024];
             int count;
             while ((count = input.read(chunk)) >= 0) {
@@ -384,16 +395,16 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
                 digest.update(chunk, 0, count);
             }
         } catch (IOException failure) {
-            if (!existing) deleteUnverified(s3, claims, failure);
+            if (!existing) deleteUnverified(s3, claims, completedVersion, failure);
             throw new IllegalStateException("could not verify completed S3 upload", failure);
         } catch (RuntimeException failure) {
-            if (!existing) deleteUnverified(s3, claims, failure);
+            if (!existing) deleteUnverified(s3, claims, completedVersion, failure);
             throw failure;
         }
         String actual = HexFormat.of().formatHex(digest.digest());
         if (read != claims.bytes() || !actual.equals(claims.sha256())) {
             SecurityException failure = new SecurityException("S3 upload size or SHA-256 differs from reservation");
-            deleteUnverified(s3, claims, failure);
+            if (!existing) deleteUnverified(s3, claims, completedVersion, failure);
             throw failure;
         }
         Map<String, String> metadata = new LinkedHashMap<>(claims.metadata());
@@ -405,14 +416,15 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
         location(target, "pathStyleAccess").ifPresent(pathStyle ->
             metadata.put(S3ObjectSourceProvider.PATH_STYLE_METADATA, pathStyle));
         PayloadReference reference = authority.issue(new PayloadReference("s3", claims.bucket(), claims.key(),
-            claims.contentType(), "raw", actual, read, null, metadata, Optional.empty()));
+            claims.contentType(), "raw", actual, read, completedVersion, metadata, Optional.empty()));
         return new ObjectWriteResult(reference, read, actual, Instant.now());
     }
 
     private static void deleteUnverified(S3Client s3, S3DelegatedUploadToken.Claims claims,
-                                         Throwable failure) {
+                                         String version, Throwable failure) {
         try {
-            s3.deleteObject(DeleteObjectRequest.builder().bucket(claims.bucket()).key(claims.key()).build());
+            s3.deleteObject(DeleteObjectRequest.builder().bucket(claims.bucket()).key(claims.key())
+                .versionId(version).build());
         } catch (RuntimeException cleanupFailure) {
             failure.addSuppressed(cleanupFailure);
         }
@@ -482,6 +494,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
             .build());
         List<CompletedPart> completedParts = new ArrayList<>();
         String completedEtag;
+        String completedVersion;
         try (InputStream composite = new java.security.DigestInputStream(
             new S3PartSequenceInputStream(s3, bucket, request.prefix(), physicalParts, request.suffix()), digest)) {
             int partNumber = 1;
@@ -499,14 +512,18 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
             if (completedParts.isEmpty()) {
                 s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
                     .bucket(bucket).key(finalKey).uploadId(created.uploadId()).build());
-                completedEtag = requireEtag(s3.putObject(PutObjectRequest.builder()
+                var completed = s3.putObject(PutObjectRequest.builder()
                         .bucket(bucket).key(finalKey).contentType(request.contentType()).metadata(request.metadata()).build(),
-                    RequestBody.empty()).eTag());
+                    RequestBody.empty());
+                completedEtag = requireEtag(completed.eTag());
+                completedVersion = completed.versionId();
             } else {
-                completedEtag = requireEtag(s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                var completed = s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
                     .bucket(bucket).key(finalKey).uploadId(created.uploadId())
                     .multipartUpload(CompletedMultipartUpload.builder().parts(completedParts).build())
-                    .build()).eTag());
+                    .build());
+                completedEtag = requireEtag(completed.eTag());
+                completedVersion = completed.versionId();
             }
         } catch (IOException | RuntimeException failure) {
             try {
@@ -531,7 +548,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
             metadata.put(S3ObjectSourceProvider.PATH_STYLE_METADATA, pathStyle));
         PayloadReference reference = authority.issue(new PayloadReference(
             "s3", bucket, finalKey, request.contentType(), "raw", checksum, totalBytes,
-            null, metadata, Optional.empty()));
+            completedVersion, metadata, Optional.empty()));
         return new ObjectWriteResult(reference, totalBytes, checksum, Instant.now());
     }
 
@@ -541,6 +558,20 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
             throw new IllegalStateException("Paged S3 part is missing metadata: " + key);
         }
         return value;
+    }
+
+    private static void verifyWrittenVersion(S3Client s3, String bucket, String key, String version,
+                                            String etag, long bytes, String contentType,
+                                            Map<String, String> metadata) {
+        // The write response, never a later latest-object observation, owns this version.
+        // Preserve existing unversioned behavior when S3 returns no version ID.
+        if (version == null) return;
+        var head = s3.headObject(HeadObjectRequest.builder().bucket(bucket).key(key).versionId(version).build());
+        if (!version.equals(head.versionId()) || head.contentLength() == null || head.contentLength() != bytes
+            || !contentType.equals(head.contentType()) || !etag.equals(requireEtag(head.eTag()))
+            || !metadata.entrySet().stream().allMatch(entry -> entry.getValue().equals(head.metadata().get(entry.getKey())))) {
+            throw new SecurityException("completed S3 version metadata differs from the write");
+        }
     }
 
     private static String requireEtag(String value) {
@@ -763,24 +794,29 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
                     uploadBufferedPart(buffer.size());
                 }
                 String completedEtag;
+                String completedVersion;
                 if (parts.isEmpty()) {
                     client.abortMultipartUpload(abortRequest());
-                    completedEtag = requireEtag(client.putObject(
+                    var response = client.putObject(
                         PutObjectRequest.builder()
                             .bucket(bucket)
                             .key(key)
                             .contentType(request.contentType())
                             .metadata(request.metadata())
                             .build(),
-                        RequestBody.empty()).eTag());
+                        RequestBody.empty());
+                    completedEtag = requireEtag(response.eTag());
+                    completedVersion = response.versionId();
                 } else {
-                    completedEtag = requireEtag(client.completeMultipartUpload(
+                    var response = client.completeMultipartUpload(
                         CompleteMultipartUploadRequest.builder()
                             .bucket(bucket)
                             .key(key)
                             .uploadId(uploadId)
                             .multipartUpload(CompletedMultipartUpload.builder().parts(parts).build())
-                            .build()).eTag());
+                            .build());
+                    completedEtag = requireEtag(response.eTag());
+                    completedVersion = response.versionId();
                 }
                 completed = true;
                 Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
@@ -802,7 +838,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
                     "raw",
                     actualChecksum,
                     writtenBytes,
-                    null,
+                    completedVersion,
                     metadata,
                     Optional.empty()));
                 return new ObjectWriteResult(reference, writtenBytes, actualChecksum, Instant.now());
