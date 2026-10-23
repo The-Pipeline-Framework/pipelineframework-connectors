@@ -455,6 +455,38 @@ class LlmQueryOperationTest {
     }
 
     @Test
+    void projectsUnionCompletionWithoutExposingTrustedCarryToTheModel() {
+        AtomicReference<LlmTurnRequest> observed = new AtomicReference<>();
+        LlmDecisionClient client = request -> {
+            observed.set(request);
+            return CompletableFuture.completedFuture(new LlmDecision(
+                new LlmToolProposal("complete", "{\"supplier\":\"Acme\"}")));
+        };
+        LlmTurnConfiguration configuration = new LlmTurnConfiguration(
+            "Choose a reply or a Query.",
+            Optional.of(Map.of("lookup", new LlmCallableConfiguration(
+                "catalogue", "lookup", "query", 1, "ToolArguments", Map.of()))),
+            Optional.of(StructuredOutputSchemaMode.OPTIONAL),
+            Optional.of(Map.of("field", "review", "trustedState", "invoiceId")),
+            List.of("invoiceId"), Map.of("state", "invoiceId"));
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        Class<Object> output = (Class) ProjectedDecision.class;
+
+        QueryOutcome<Object> outcome = operation(client).query(new QueryInvocation<>(
+            new ReviewInput("trusted-invoice-7", "evidence"), configuration, output,
+            ConnectorExecutionContext.empty())).toCompletableFuture().join();
+
+        ProjectedDecision.Complete complete = assertInstanceOf(ProjectedDecision.Complete.class,
+            assertInstanceOf(QueryOutcome.Found.class, outcome).output());
+        assertEquals("trusted-invoice-7", complete.value().trustedState());
+        assertEquals("Acme", complete.value().review().supplier());
+        String schema = observed.get().tools().stream()
+            .filter(tool -> tool.alias().equals("complete")).findFirst().orElseThrow().inputSchemaJson();
+        assertTrue(schema.contains("supplier"));
+        assertFalse(schema.contains("trustedState"));
+    }
+
+    @Test
     void nullIntermediateCarryValueIsAnInvalidModelDecision() {
         LlmDecisionClient client = new LlmDecisionClient() {
             @Override
