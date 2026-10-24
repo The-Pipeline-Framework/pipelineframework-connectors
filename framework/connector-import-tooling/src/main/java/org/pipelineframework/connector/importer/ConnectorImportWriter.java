@@ -67,7 +67,7 @@ public final class ConnectorImportWriter {
         providers.removeIf(provider -> provider.provider().id().equals(replacement.provider().id()));
         providers.add(replacement);
         providers.sort(Comparator.comparing(provider -> provider.provider().id()));
-        return new ConnectorProviderManifest(ConnectorProviderManifest.CURRENT_SCHEMA_VERSION, providers);
+        return ConnectorProviderArtifacts.manifestFromArtifacts(providers);
     }
 
     private static Map<String, String> resources(Collection<ConnectorImportResource> resources) {

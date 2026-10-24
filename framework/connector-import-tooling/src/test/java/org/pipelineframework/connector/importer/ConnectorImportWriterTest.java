@@ -33,6 +33,7 @@ class ConnectorImportWriterTest {
 
         var manifest = ConnectorProviderManifestReader.read(Files.newInputStream(
             temporary.resolve("META-INF/pipeline/connector-providers.json")));
+        assertEquals(7, manifest.schemaVersion());
         assertEquals(List.of("http.client", "mcp.client"), manifest.providers().stream()
             .map(value -> value.provider().id().value()).toList());
         assertEquals("old", Files.readString(temporary.resolve("META-INF/pipeline/mcp-tools.json")));
