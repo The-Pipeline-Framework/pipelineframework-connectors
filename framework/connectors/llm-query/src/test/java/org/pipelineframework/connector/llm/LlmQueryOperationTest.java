@@ -15,6 +15,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.pipelineframework.connector.ConnectionResolutionException;
+import org.pipelineframework.connector.ConnectorOperationTypeMode;
 import org.pipelineframework.connector.ConnectorExecutionContext;
 import org.pipelineframework.connector.ConnectorConfigurationBinder;
 import org.pipelineframework.connector.ConnectorConfigurationDocument;
@@ -45,6 +46,7 @@ class LlmQueryOperationTest {
 
         assertEquals(org.pipelineframework.connector.QueryCacheability.CACHEABLE,
             operation.capabilities().cacheability());
+        assertEquals(ConnectorOperationTypeMode.APPLICATION_PROJECTED, operation.typeMode());
     }
     private record InvoiceInput(PayloadReference payloadReference) { }
     private record InvoiceBatchInput(java.util.List<PayloadReference> payloadReferences) { }

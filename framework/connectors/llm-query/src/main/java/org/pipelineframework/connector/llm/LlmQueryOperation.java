@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.pipelineframework.config.pipeline.PipelineJson;
 import org.pipelineframework.connector.ConnectorConfigSchema;
+import org.pipelineframework.connector.ConnectorOperationTypeMode;
 import org.pipelineframework.connector.MaterializedPayload;
 import org.pipelineframework.connector.PayloadMaterializer;
 import org.pipelineframework.connector.QueryCapabilities;
@@ -61,6 +62,11 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
     @Override
     public String id() {
         return "decide";
+    }
+
+    @Override
+    public ConnectorOperationTypeMode typeMode() {
+        return ConnectorOperationTypeMode.APPLICATION_PROJECTED;
     }
 
     @Override
