@@ -10,8 +10,10 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.HexFormat;
 import java.util.Objects;
@@ -60,6 +62,10 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.ListPartsRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
+import software.amazon.awssdk.services.s3.model.MetadataDirective;
+import software.amazon.awssdk.services.s3.model.UploadPartCopyRequest;
+import software.amazon.awssdk.services.s3.model.TaggingDirective;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.UploadPartPresignRequest;
 
@@ -69,6 +75,7 @@ import software.amazon.awssdk.services.s3.presigner.model.UploadPartPresignReque
 public class S3ObjectTargetProvider implements PagedObjectTargetProvider, DelegatedPayloadTarget, AutoCloseable {
     static final int DEFAULT_PART_SIZE_BYTES = 8 * 1024 * 1024;
     private static final int MIN_PART_SIZE_BYTES = 5 * 1024 * 1024;
+    static final String FINAL_METADATA_PREFIX = "tpf.final.";
 
     private final Optional<S3Client> client;
     private final S3ReferenceAuthority authority;
@@ -447,8 +454,8 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
                 listed.contents().stream()
                     .filter(object -> object.key().endsWith(".part"))
                     .forEach(object -> {
-                        Map<String, String> metadata = s3.headObject(HeadObjectRequest.builder()
-                            .bucket(bucket).key(object.key()).build()).metadata();
+                        Map<String, String> metadata = restoreFinalMetadata(s3.headObject(HeadObjectRequest.builder()
+                            .bucket(bucket).key(object.key()).build()).metadata());
                         parts.add(new PagedObjectPart(
                             requiredMetadata(metadata, "tpf.page.partkey"),
                             requiredMetadata(metadata, "tpf.page.group"),
@@ -790,6 +797,9 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
             CompletionStage<ObjectWriteResult> close = operationTail.thenApplyAsync(ignored -> {
                 String actualChecksum = HexFormat.of().formatHex(digest.digest());
                 validateClose(closeRequest, actualChecksum);
+                Map<String, String> finalMetadata = new LinkedHashMap<>(request.metadata());
+                finalMetadata.putAll(closeRequest.metadata());
+                Map<String, String> storedMetadata = storedFinalMetadata(request.metadata(), finalMetadata);
                 if (buffer.size() > 0) {
                     uploadBufferedPart(buffer.size());
                 }
@@ -802,7 +812,7 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
                             .bucket(bucket)
                             .key(key)
                             .contentType(request.contentType())
-                            .metadata(request.metadata())
+                            .metadata(storedMetadata)
                             .build(),
                         RequestBody.empty());
                     completedEtag = requireEtag(response.eTag());
@@ -819,6 +829,12 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
                     completedVersion = response.versionId();
                 }
                 completed = true;
+                if (!parts.isEmpty() && !finalMetadata.equals(request.metadata())) {
+                    MetadataCopy copied = replaceMetadata(client, bucket, key, completedVersion,
+                        completedEtag, request.contentType(), writtenBytes, storedMetadata);
+                    completedEtag = copied.etag();
+                    completedVersion = copied.version();
+                }
                 Map<String, String> metadata = new LinkedHashMap<>(request.metadata());
                 metadata.putAll(closeRequest.metadata());
                 metadata.put("target", request.targetName());
@@ -926,6 +942,86 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
             } catch (NoSuchAlgorithmException failure) {
                 throw new IllegalStateException("SHA-256 is unavailable", failure);
             }
+        }
+    }
+
+    // S3 lowercases header names. Retain close-time keys for a fresh paged reader.
+    private static Map<String, String> storedFinalMetadata(
+        Map<String, String> initial, Map<String, String> complete) {
+        Map<String, String> delta = new LinkedHashMap<>();
+        complete.forEach((key, value) -> {
+            if (!Objects.equals(initial.get(key), value)) {
+                delta.put(key, value);
+            }
+        });
+        Map<String, String> stored = new LinkedHashMap<>();
+        complete.forEach((key, value) -> stored.put(key.toLowerCase(Locale.ROOT), value));
+        delta.forEach((key, value) -> stored.put(
+            FINAL_METADATA_PREFIX + HexFormat.of().formatHex(key.getBytes(StandardCharsets.UTF_8)),
+            Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8))));
+        return stored;
+    }
+
+    static Map<String, String> restoreFinalMetadata(Map<String, String> stored) {
+        Map<String, String> restored = new LinkedHashMap<>(stored);
+        Map<String, String> delta = new LinkedHashMap<>();
+        stored.forEach((key, value) -> {
+            if (key.startsWith(FINAL_METADATA_PREFIX)) {
+                try {
+                    String originalKey = new String(HexFormat.of().parseHex(
+                        key.substring(FINAL_METADATA_PREFIX.length())), StandardCharsets.UTF_8);
+                    delta.put(originalKey, new String(Base64.getDecoder().decode(value), StandardCharsets.UTF_8));
+                    restored.remove(key);
+                    restored.remove(originalKey.toLowerCase(Locale.ROOT));
+                } catch (IllegalArgumentException failure) {
+                    throw new IllegalStateException("S3 final metadata could not be decoded", failure);
+                }
+            }
+        });
+        restored.putAll(delta);
+        return Map.copyOf(restored);
+    }
+
+    record MetadataCopy(String etag, String version) { }
+
+    static MetadataCopy replaceMetadata(S3Client client, String bucket, String key,
+        String version, String etag, String contentType, long bytes, Map<String, String> metadata) {
+        if (bytes <= 5_000_000_000L) {
+            var copied = client.copyObject(CopyObjectRequest.builder()
+                .sourceBucket(bucket).sourceKey(key).sourceVersionId(version).copySourceIfMatch(etag)
+                .destinationBucket(bucket).destinationKey(key).contentType(contentType)
+                .metadataDirective(MetadataDirective.REPLACE).metadata(metadata)
+                .taggingDirective(TaggingDirective.REPLACE).build());
+            return new MetadataCopy(requireEtag(copied.copyObjectResult().eTag()), copied.versionId());
+        }
+        // A large streamed object must not acquire CopyObject's 5 GB size limit.
+        var upload = client.createMultipartUpload(CreateMultipartUploadRequest.builder()
+            .bucket(bucket).key(key).contentType(contentType).metadata(metadata).build());
+        try {
+            List<CompletedPart> copiedParts = new ArrayList<>();
+            long partBytes = Math.max(1L << 30, (bytes + 9_999) / 10_000);
+            for (long offset = 0; offset < bytes; offset += partBytes) {
+                long end = Math.min(bytes - 1, offset + partBytes - 1);
+                int part = copiedParts.size() + 1;
+                var copied = client.uploadPartCopy(UploadPartCopyRequest.builder()
+                    .sourceBucket(bucket).sourceKey(key).sourceVersionId(version).copySourceIfMatch(etag)
+                    .destinationBucket(bucket).destinationKey(key).uploadId(upload.uploadId())
+                    .partNumber(part).copySourceRange("bytes=" + offset + "-" + end).build());
+                copiedParts.add(CompletedPart.builder().partNumber(part)
+                    .eTag(requireEtag(copied.copyPartResult().eTag())).build());
+            }
+            var copied = client.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                .bucket(bucket).key(key).uploadId(upload.uploadId())
+                .multipartUpload(CompletedMultipartUpload.builder().parts(copiedParts).build()).build());
+            return new MetadataCopy(requireEtag(copied.eTag()), copied.versionId());
+        } catch (RuntimeException failure) {
+            try {
+                client.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                    .bucket(bucket).key(key).uploadId(upload.uploadId()).build());
+            } catch (RuntimeException abortFailure) {
+                failure.addSuppressed(abortFailure);
+            }
+            throw failure;
         }
     }
 }
