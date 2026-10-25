@@ -66,6 +66,23 @@
         ]
       }
     },
+    "ProjectedCompletion": {
+      "runtimeClass": "org.pipelineframework.connector.llm.projected.ProjectedCompletion",
+      "definition": {
+        "id": "ProjectedCompletion", "kind": "record", "fields": [
+          {"name":"trustedState","type":{"kind":"scalar","id":"string"}},
+          {"name":"review","type":{"kind":"named","id":"ReviewReady"}}
+        ]
+      }
+    },
+    "ProjectedDecision": {
+      "definition": {
+        "id":"ProjectedDecision", "kind":"union", "variants":[
+          {"discriminator":"call","payload":{"kind":"named","id":"AgentCall"}},
+          {"discriminator":"complete","payload":{"kind":"named","id":"ProjectedCompletion"}}
+        ]
+      }
+    },
     "ToolArguments": {
       "definition": {
         "id": "ToolArguments",

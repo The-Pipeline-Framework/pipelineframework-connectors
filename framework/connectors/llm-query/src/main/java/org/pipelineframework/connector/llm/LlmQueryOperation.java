@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.pipelineframework.config.pipeline.PipelineJson;
 import org.pipelineframework.connector.ConnectorConfigSchema;
+import org.pipelineframework.connector.ConnectorOperationTypeMode;
 import org.pipelineframework.connector.MaterializedPayload;
 import org.pipelineframework.connector.PayloadMaterializer;
 import org.pipelineframework.connector.QueryCapabilities;
@@ -61,6 +62,11 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
     @Override
     public String id() {
         return "decide";
+    }
+
+    @Override
+    public ConnectorOperationTypeMode typeMode() {
+        return ConnectorOperationTypeMode.APPLICATION_PROJECTED;
     }
 
     @Override
@@ -311,6 +317,20 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
             if (configuration.callableCatalogue().isEmpty() && decisions.isEmpty()) {
                 throw new IllegalStateException("LLM Query has no callable or decision alternative");
             }
+            Optional<LlmDirectCompletionProjection> projection = configuration.directCompletion().map(value -> {
+                if (decisions.size() != 1) {
+                    throw new IllegalStateException(
+                        "LLM projected union completion requires exactly one non-call decision variant");
+                }
+                String completionType = decisions.values().iterator().next();
+                try {
+                    return new LlmDirectCompletionProjection(
+                        payloadClass(catalogue, outputType, completionType, classLoader), value);
+                } catch (ClassNotFoundException failure) {
+                    throw new IllegalStateException("LLM completion payload type is unavailable: "
+                        + completionType, failure);
+                }
+            });
             List<LlmToolDefinition> tools = new ArrayList<>();
             configuration.callableCatalogue().entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
                 if (decisions.containsKey(entry.getKey())) {
@@ -323,9 +343,12 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
                     "Propose " + callable.using() + "/" + callable.operation(),
                     catalogue.schema(callable.input(), callable.trustedArgumentMappings().keySet())));
             });
-            decisions.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry ->
+            decisions.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
+                String schemaType = projection.map(value -> value.completionType().getSimpleName())
+                    .orElse(entry.getValue());
                 tools.add(new LlmToolDefinition(
-                    entry.getKey(), "Return " + entry.getValue(), catalogue.schema(entry.getValue()))));
+                    entry.getKey(), "Return " + entry.getValue(), catalogue.schema(schemaType)));
+            });
             return new DecisionContract(
                 outputType,
                 classLoader,
@@ -334,7 +357,7 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
                 decisions,
                 Optional.of(callDiscriminator),
                 Optional.empty(),
-                Optional.empty(),
+                projection,
                 configuration.callContextMappings(),
                 tools);
         }
@@ -381,15 +404,28 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
                 throw new InvalidModelDecisionException("model selected unknown tool alias '" + proposal.alias() + "'");
             }
             try {
-                String arguments = catalogue.validateAndCanonicalize(decisionType, proposal.argumentsJson());
-                Class<?> payloadType = Class.forName(outputType.getPackageName() + "." + decisionType, true,
-                    classLoader);
-                return instantiateVariant(proposal.alias(), JSON.readValue(arguments, payloadType));
+                String schemaType = directCompletion.map(value -> value.completionType().getSimpleName())
+                    .orElse(decisionType);
+                String arguments = catalogue.validateAndCanonicalize(schemaType, proposal.argumentsJson());
+                Class<?> payloadType = payloadClass(catalogue, outputType, decisionType, classLoader);
+                Object modelValue = directCompletion.isPresent()
+                    ? JSON.readValue(arguments, directCompletion.orElseThrow().completionType())
+                    : JSON.readValue(arguments, payloadType);
+                return instantiateVariant(proposal.alias(), directCompletion
+                    .map(value -> value.materialize(input, modelValue)).orElse(modelValue));
             } catch (InvalidModelDecisionException failure) {
                 throw failure;
             } catch (Exception failure) {
                 throw new InvalidModelDecisionException("decision payload cannot be materialized", failure);
             }
+        }
+
+        private static Class<?> payloadClass(
+            CanonicalTypeCatalogue catalogue, Class<?> unionType, String canonicalType, ClassLoader classLoader
+        ) throws ClassNotFoundException {
+            String javaName = catalogue.runtimeClass(canonicalType)
+                .orElseGet(() -> unionType.getPackageName() + "." + canonicalType);
+            return Class.forName(javaName, true, classLoader);
         }
 
         private String materializeCallableArguments(
