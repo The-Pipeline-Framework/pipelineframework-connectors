@@ -800,6 +800,21 @@ public class S3ObjectTargetProvider implements PagedObjectTargetProvider, Delega
                 Map<String, String> finalMetadata = new LinkedHashMap<>(request.metadata());
                 finalMetadata.putAll(closeRequest.metadata());
                 Map<String, String> storedMetadata = storedFinalMetadata(request.metadata(), finalMetadata);
+                try {
+                    long metadataBytes = storedMetadata.entrySet().stream().mapToLong(entry ->
+                        (long) entry.getKey().getBytes(StandardCharsets.UTF_8).length
+                            + entry.getValue().getBytes(StandardCharsets.UTF_8).length).sum();
+                    if (metadataBytes > 2048) {
+                        throw new IllegalStateException("S3 stored user metadata exceeds 2048 UTF-8 bytes");
+                    }
+                } catch (RuntimeException failure) {
+                    try {
+                        client.abortMultipartUpload(abortRequest());
+                    } catch (RuntimeException abortFailure) {
+                        failure.addSuppressed(abortFailure);
+                    }
+                    throw failure;
+                }
                 if (buffer.size() > 0) {
                     uploadBufferedPart(buffer.size());
                 }

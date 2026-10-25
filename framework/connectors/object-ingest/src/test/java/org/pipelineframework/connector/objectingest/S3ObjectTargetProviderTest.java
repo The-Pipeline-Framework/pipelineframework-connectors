@@ -171,6 +171,9 @@ class S3ObjectTargetProviderTest {
             && "source-etag".equals(r.copySourceIfMatch())));
         assertEquals("large-version", result.version());
         verify(client, never()).getObject(any(GetObjectRequest.class));
+        verify(client, never()).getObject(any(GetObjectRequest.class),
+            any(software.amazon.awssdk.core.sync.ResponseTransformer.class));
+        verify(client, never()).getObjectAsBytes(any(GetObjectRequest.class));
         verify(client, never()).copyObject(any(CopyObjectRequest.class));
     }
 
@@ -205,6 +208,44 @@ class S3ObjectTargetProviderTest {
             assertEquals("metadata unavailable", failed.getCause().getMessage());
             session.abort(failed).toCompletableFuture().join();
             verify(client, never()).deleteObject(any(software.amazon.awssdk.services.s3.model.DeleteObjectRequest.class));
+        }
+    }
+
+    @Test
+    void encodedCloseMetadataSizeIsValidatedBeforeCompletingPayload() {
+        S3Client client = mock(S3Client.class);
+        when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+            .thenReturn(CreateMultipartUploadResponse.builder().uploadId("oversized-metadata").build());
+        RuntimeException abortFailure = new RuntimeException("abort unavailable");
+        doThrow(abortFailure).when(client).abortMultipartUpload(any(AbortMultipartUploadRequest.class));
+        try (var provider = new S3ObjectTargetProvider(client, Runnable::run, 5 * 1024 * 1024)) {
+            var session = provider.open(openRequest()).toCompletableFuture().join();
+            session.write(ByteBuffer.wrap(new byte[] {1})).toCompletableFuture().join();
+            var failure = assertThrows(CompletionException.class, () -> session.close(
+                new ObjectWriteCloseRequest(1, sha256(new byte[] {1}), Map.of("label", "é".repeat(600))))
+                .toCompletableFuture().join());
+            assertEquals("S3 stored user metadata exceeds 2048 UTF-8 bytes", failure.getCause().getMessage());
+            assertSame(abortFailure, failure.getCause().getSuppressed()[0]);
+            verify(client, never()).uploadPart(any(UploadPartRequest.class), any(RequestBody.class));
+            verify(client, never()).completeMultipartUpload(any(CompleteMultipartUploadRequest.class));
+        }
+    }
+
+    @Test
+    void nonAsciiCloseMetadataWithinStoredSizeLimitRemainsSupported() {
+        S3Client client = mock(S3Client.class);
+        when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+            .thenReturn(CreateMultipartUploadResponse.builder().uploadId("unicode-metadata").build());
+        when(client.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
+            .thenReturn(PutObjectResponse.builder().eTag("empty-etag").build());
+        try (var provider = new S3ObjectTargetProvider(client, Runnable::run, 5 * 1024 * 1024)) {
+            provider.open(openRequest()).toCompletableFuture().join()
+                .close(new ObjectWriteCloseRequest(0, sha256(new byte[0]), Map.of("finalLabel", "é".repeat(400))))
+                .toCompletableFuture().join();
+            var put = ArgumentCaptor.forClass(PutObjectRequest.class);
+            verify(client).putObject(put.capture(), any(RequestBody.class));
+            assertEquals("é".repeat(400),
+                S3ObjectTargetProvider.restoreFinalMetadata(put.getValue().metadata()).get("finalLabel"));
         }
     }
 
