@@ -103,6 +103,14 @@ class LlmQueryOperationTest {
             .query(invocation).toCompletableFuture().join();
         assertEquals("invalid-model-decision",
             assertInstanceOf(QueryOutcome.TerminalFailure.class, malformed).code());
+
+        QueryOutcome<Object> lookup = operation(request -> CompletableFuture.completedFuture(
+            new LlmDecision(new LlmToolProposal("lookup", "{\"amount\":42,\"note\":\"read\"}"))))
+            .query(invocation).toCompletableFuture().join();
+        HandoffDecision.Call queryCall = assertInstanceOf(HandoffDecision.Call.class,
+            assertInstanceOf(QueryOutcome.Found.class, lookup).output());
+        assertEquals("catalogue", queryCall.value().binding());
+        assertEquals("lookup", queryCall.value().operation());
     }
 
     @Test
