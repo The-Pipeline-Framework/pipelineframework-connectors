@@ -23,6 +23,16 @@ class LlmProtocolTypeContributorTest {
         assertEquals(java.util.List.of("binding", "operation", "argumentsJson", "contextJson"),
             record.fields().stream().map(org.pipelineframework.config.template.PipelineTemplateTypeDefinition.Field::name).toList());
 
+        var handoffCall = contributions.stream()
+            .filter(type -> type.identity().qualifiedName().equals("tpf.llm.HandoffCall"))
+            .findFirst()
+            .orElseThrow();
+        var handoffRecord = (org.pipelineframework.config.template.PipelineTemplateTypeDefinition.RecordType)
+            handoffCall.definition();
+        assertEquals(java.util.List.of("binding", "operation", "argumentsJson", "contextJson"),
+            handoffRecord.fields().stream()
+                .map(org.pipelineframework.config.template.PipelineTemplateTypeDefinition.Field::name).toList());
+
         var askUser = contributions.stream()
             .filter(type -> type.identity().qualifiedName().equals("tpf.llm.AskUser"))
             .findFirst()

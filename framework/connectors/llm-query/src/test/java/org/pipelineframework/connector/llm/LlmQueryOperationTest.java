@@ -61,6 +61,59 @@ class LlmQueryOperationTest {
         StructuredOutputSchemaMode.OPTIONAL);
 
     @Test
+    void commandCallableBecomesValidatedInertHandoffWhenUnionDeclaresHandoffCall() {
+        LlmTurnConfiguration configuration = new LlmTurnConfiguration(
+            "Reply, read, or hand off.", Optional.of(Map.of(
+                "charge", new LlmCallableConfiguration(
+                    "payments", "charge.create", "command", 1, "ToolArguments",
+                    Map.of("note", "invoiceId")),
+                "lookup", new LlmCallableConfiguration(
+                    "catalogue", "lookup", "query", 1, "ToolArguments", Map.of()))),
+            Optional.of(StructuredOutputSchemaMode.OPTIONAL), Optional.empty(),
+            List.of("invoiceId"), Map.of("state", "invoiceId"));
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        Class<Object> output = (Class) HandoffDecision.class;
+        QueryInvocation<Object, LlmTurnConfiguration, Object> invocation = new QueryInvocation<>(
+            new ReviewInput("invoice-7", "evidence"), configuration, output,
+            ConnectorExecutionContext.empty());
+        QueryOutcome<Object> outcome = operation(request -> CompletableFuture.completedFuture(
+            new LlmDecision(new LlmToolProposal("charge", "{\"amount\":42}"))))
+            .query(invocation).toCompletableFuture().join();
+
+        HandoffDecision.Handoff handoff = assertInstanceOf(HandoffDecision.Handoff.class,
+            assertInstanceOf(QueryOutcome.Found.class, outcome).output());
+        assertEquals("payments", handoff.value().binding());
+        assertEquals("charge.create", handoff.value().operation());
+        assertEquals("{\"amount\":42,\"note\":\"invoice-7\"}", handoff.value().argumentsJson());
+        assertEquals("{\"state\":\"invoice-7\"}", handoff.value().contextJson());
+
+        QueryOutcome<Object> forged = operation(request -> CompletableFuture.completedFuture(
+            new LlmDecision(new LlmToolProposal("charge",
+                "{\"amount\":42,\"note\":\"forged\"}"))))
+            .query(invocation).toCompletableFuture().join();
+        assertEquals("invalid-model-decision",
+            assertInstanceOf(QueryOutcome.TerminalFailure.class, forged).code());
+        QueryOutcome<Object> unknownAlias = operation(request -> CompletableFuture.completedFuture(
+            new LlmDecision(new LlmToolProposal("unbound_command", "{\"amount\":42}"))))
+            .query(invocation).toCompletableFuture().join();
+        assertEquals("invalid-model-decision",
+            assertInstanceOf(QueryOutcome.TerminalFailure.class, unknownAlias).code());
+        QueryOutcome<Object> malformed = operation(request -> CompletableFuture.completedFuture(
+            new LlmDecision(new LlmToolProposal("charge", "{\"amount\":\"forty two\"}"))))
+            .query(invocation).toCompletableFuture().join();
+        assertEquals("invalid-model-decision",
+            assertInstanceOf(QueryOutcome.TerminalFailure.class, malformed).code());
+
+        QueryOutcome<Object> lookup = operation(request -> CompletableFuture.completedFuture(
+            new LlmDecision(new LlmToolProposal("lookup", "{\"amount\":42,\"note\":\"read\"}"))))
+            .query(invocation).toCompletableFuture().join();
+        HandoffDecision.Call queryCall = assertInstanceOf(HandoffDecision.Call.class,
+            assertInstanceOf(QueryOutcome.Found.class, lookup).output());
+        assertEquals("catalogue", queryCall.value().binding());
+        assertEquals("lookup", queryCall.value().operation());
+    }
+
+    @Test
     void performsOneInferenceAndConstructsTrustedBoundAgentCall() {
         AtomicInteger calls = new AtomicInteger();
         QueryObservation observation = observation();
