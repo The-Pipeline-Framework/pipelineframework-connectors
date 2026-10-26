@@ -14,6 +14,8 @@ import org.pipelineframework.protocol.ProtocolTypeIdentity;
 public final class LlmProtocolTypeContributor implements ProtocolTypeContributor {
     public static final ProtocolTypeIdentity AGENT_CALL =
         new ProtocolTypeIdentity(ConnectorProviderId.of("tpf.llm"), "AgentCall");
+    public static final ProtocolTypeIdentity HANDOFF_CALL =
+        new ProtocolTypeIdentity(ConnectorProviderId.of("tpf.llm"), "HandoffCall");
     public static final ProtocolTypeIdentity ASK_USER =
         new ProtocolTypeIdentity(ConnectorProviderId.of("tpf.llm"), "AskUser");
 
@@ -24,6 +26,13 @@ public final class LlmProtocolTypeContributor implements ProtocolTypeContributor
             new ProtocolTypeDescriptor(
                 AGENT_CALL,
                 new PipelineTemplateTypeDefinition.RecordType("AgentCall", List.of(
+                    new PipelineTemplateTypeDefinition.Field("binding", string),
+                    new PipelineTemplateTypeDefinition.Field("operation", string),
+                    new PipelineTemplateTypeDefinition.Field("argumentsJson", string),
+                    new PipelineTemplateTypeDefinition.Field("contextJson", string)))),
+            new ProtocolTypeDescriptor(
+                HANDOFF_CALL,
+                new PipelineTemplateTypeDefinition.RecordType("HandoffCall", List.of(
                     new PipelineTemplateTypeDefinition.Field("binding", string),
                     new PipelineTemplateTypeDefinition.Field("operation", string),
                     new PipelineTemplateTypeDefinition.Field("argumentsJson", string),

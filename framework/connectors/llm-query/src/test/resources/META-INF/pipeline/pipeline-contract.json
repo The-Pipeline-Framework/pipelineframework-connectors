@@ -18,6 +18,19 @@
         ]
       }
     },
+    "HandoffCall": {
+      "contributedIdentity": "tpf.llm.HandoffCall",
+      "definition": {
+        "id": "HandoffCall",
+        "kind": "record",
+        "fields": [
+          {"name":"argumentsJson","type":{"kind":"scalar","id":"string"}},
+          {"name":"binding","type":{"kind":"scalar","id":"string"}},
+          {"name":"contextJson","type":{"kind":"scalar","id":"string"}},
+          {"name":"operation","type":{"kind":"scalar","id":"string"}}
+        ]
+      }
+    },
     "AskUser": {
       "contributedIdentity": "tpf.llm.AskUser",
       "definition": {
@@ -44,6 +57,15 @@
           {"discriminator":"askUser","payload":{"kind":"named","id":"AskUser"}},
           {"discriminator":"call","payload":{"kind":"named","id":"AgentCall"}},
           {"discriminator":"complete","payload":{"kind":"named","id":"CompleteResult"}}
+        ]
+      }
+    },
+    "HandoffDecision": {
+      "definition": {
+        "id": "HandoffDecision", "kind": "union", "variants": [
+          {"discriminator":"call","payload":{"kind":"named","id":"AgentCall"}},
+          {"discriminator":"complete","payload":{"kind":"named","id":"CompleteResult"}},
+          {"discriminator":"handoff","payload":{"kind":"named","id":"HandoffCall"}}
         ]
       }
     },

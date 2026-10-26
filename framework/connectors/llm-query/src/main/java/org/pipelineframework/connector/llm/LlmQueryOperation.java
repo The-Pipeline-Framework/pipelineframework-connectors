@@ -250,6 +250,7 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
         Map<String, LlmCallableConfiguration> callables,
         Map<String, String> decisionVariants,
         Optional<String> callDiscriminator,
+        Optional<String> handoffDiscriminator,
         Optional<String> directCompletionType,
         Optional<LlmDirectCompletionProjection> directCompletion,
         Map<String, String> callContext,
@@ -259,6 +260,8 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
             callables = Map.copyOf(callables);
             decisionVariants = Map.copyOf(decisionVariants);
             callDiscriminator = Objects.requireNonNull(callDiscriminator, "call discriminator must not be null");
+            handoffDiscriminator = Objects.requireNonNull(
+                handoffDiscriminator, "handoff discriminator must not be null");
             directCompletionType = Objects.requireNonNull(
                 directCompletionType, "direct completion type must not be null");
             directCompletion = Objects.requireNonNull(
@@ -291,6 +294,7 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
                     Map.of(),
                     Map.of(),
                     Optional.empty(),
+                    Optional.empty(),
                     Optional.of(completionType),
                     projection,
                     configuration.callContextMappings(),
@@ -308,12 +312,26 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
                     + "' must declare exactly one <tpf.llm.AgentCall> variant");
             }
             String callDiscriminator = callVariants.getFirst();
+            List<String> handoffVariants = variants.entrySet().stream()
+                .filter(entry -> catalogue.contributedIdentity(entry.getValue())
+                    .filter(LlmProtocolTypeContributor.HANDOFF_CALL.qualifiedName()::equals).isPresent())
+                .map(Map.Entry::getKey)
+                .toList();
+            if (handoffVariants.size() > 1) {
+                throw new IllegalStateException("LLM Query output union must declare at most one <tpf.llm.HandoffCall> variant");
+            }
+            Optional<String> handoffDiscriminator = handoffVariants.stream().findFirst();
             Map<String, String> decisions = new LinkedHashMap<>();
             variants.forEach((discriminator, payload) -> {
-                if (!discriminator.equals(callDiscriminator)) {
+                if (!discriminator.equals(callDiscriminator)
+                    && !handoffDiscriminator.filter(discriminator::equals).isPresent()) {
                     decisions.put(discriminator, payload);
                 }
             });
+            if (handoffDiscriminator.isPresent() && configuration.callableCatalogue().values().stream()
+                .noneMatch(callable -> callable.operationKind() == org.pipelineframework.connector.ConnectorOperationKind.COMMAND)) {
+                throw new IllegalStateException("LLM handoff variant requires at least one Command callable");
+            }
             if (configuration.callableCatalogue().isEmpty() && decisions.isEmpty()) {
                 throw new IllegalStateException("LLM Query has no callable or decision alternative");
             }
@@ -356,6 +374,7 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
                 configuration.callableCatalogue(),
                 decisions,
                 Optional.of(callDiscriminator),
+                handoffDiscriminator,
                 Optional.empty(),
                 projection,
                 configuration.callContextMappings(),
@@ -391,8 +410,12 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
                 try {
                     String arguments = materializeCallableArguments(callable, proposal.argumentsJson(), input);
                     String contextJson = MODEL_INPUT.selectedFieldsJson(input, callContext);
-                    Object agentCall = instantiateAgentCall(callable, arguments, contextJson);
-                    return instantiateVariant(callDiscriminator.orElseThrow(), agentCall);
+                    boolean handoff = handoffDiscriminator.isPresent()
+                        && callable.operationKind() == org.pipelineframework.connector.ConnectorOperationKind.COMMAND;
+                    Object call = instantiateCall(callable, arguments, contextJson,
+                        handoff ? "HandoffCall" : "AgentCall");
+                    return instantiateVariant(handoff
+                        ? handoffDiscriminator.orElseThrow() : callDiscriminator.orElseThrow(), call);
                 } catch (InvalidModelDecisionException failure) {
                     throw failure;
                 } catch (Exception failure) {
@@ -450,19 +473,20 @@ final class LlmQueryOperation implements QueryOperation<Object, LlmTurnConfigura
             return catalogue.validateAndCanonicalize(callable.input(), JSON.writeValueAsString(modelArguments));
         }
 
-        private Object instantiateAgentCall(
+        private Object instantiateCall(
             LlmCallableConfiguration callable,
             String arguments,
-            String contextJson
+            String contextJson,
+            String typeName
         ) {
             try {
-                Class<?> agentCall = Class.forName(outputType.getPackageName() + ".AgentCall", true,
+                Class<?> callType = Class.forName(outputType.getPackageName() + "." + typeName, true,
                     classLoader);
-                Constructor<?> constructor = agentCall.getDeclaredConstructor(
+                Constructor<?> constructor = callType.getDeclaredConstructor(
                     String.class, String.class, String.class, String.class);
                 return constructor.newInstance(callable.using(), callable.operation(), arguments, contextJson);
             } catch (Exception failure) {
-                throw new InvalidModelDecisionException("AgentCall payload cannot be materialized", failure);
+                throw new InvalidModelDecisionException(typeName + " payload cannot be materialized", failure);
             }
         }
 
