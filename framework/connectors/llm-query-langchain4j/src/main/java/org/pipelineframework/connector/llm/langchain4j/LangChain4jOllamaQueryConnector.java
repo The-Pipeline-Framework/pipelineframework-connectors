@@ -24,6 +24,7 @@ import dev.langchain4j.data.pdf.PdfFile;
 import dev.langchain4j.data.image.Image;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.model.chat.request.ToolChoice;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.output.TokenUsage;
@@ -215,10 +216,21 @@ public final class LangChain4jOllamaQueryConnector extends LlmQueryConnectorProv
                     SystemMessage.from(request.instructions()),
                     userMessage(request, false))
                 .toolSpecifications(tools)
+                .toolChoice(ToolChoice.REQUIRED)
                 .build();
             return model.chat(chat, Optional.empty()).thenApply(response -> {
                 List<ToolExecutionRequest> proposals = response.aiMessage().toolExecutionRequests();
                 proposals = proposals == null ? List.of() : proposals;
+                if (proposals.isEmpty()) {
+                    Optional<LlmToolDefinition> completion = textCompletion(request.tools());
+                    String reply = response.aiMessage().text();
+                    if (completion.isPresent() && reply != null && !reply.isBlank()) {
+                        ObjectNode arguments = PipelineJson.mapper().createObjectNode();
+                        arguments.put("text", reply);
+                        return decision(response, new LlmToolProposal(
+                            completion.orElseThrow().alias(), arguments.toString()));
+                    }
+                }
                 if (proposals.size() != 1) {
                     return decision(response, new LlmToolProposal("", "{}"));
                 }
@@ -279,6 +291,24 @@ public final class LangChain4jOllamaQueryConnector extends LlmQueryConnectorProv
             return tools.size() == 1 && "complete".equals(tools.getFirst().alias())
                 ? Optional.of(tools.getFirst())
                 : Optional.empty();
+        }
+
+        private static Optional<LlmToolDefinition> textCompletion(List<LlmToolDefinition> tools) {
+            return tools.stream().filter(tool -> "complete".equals(tool.alias())).filter(tool -> {
+                try {
+                    var schema = PipelineJson.mapper().readTree(tool.inputSchemaJson());
+                    var required = schema.path("required");
+                    return "object".equals(schema.path("type").asText())
+                        && schema.path("additionalProperties").isBoolean()
+                        && !schema.path("additionalProperties").asBoolean()
+                        && schema.path("properties").size() == 1
+                        && "string".equals(schema.path("properties").path("text").path("type").asText())
+                        && required.isArray() && required.size() == 1
+                        && "text".equals(required.get(0).asText());
+                } catch (Exception invalidSchema) {
+                    return false;
+                }
+            }).findFirst();
         }
 
         private UserMessage userMessage(LlmTurnRequest request, boolean nativeCompletion) {
