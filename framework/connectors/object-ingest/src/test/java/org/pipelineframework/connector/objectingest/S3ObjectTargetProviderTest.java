@@ -50,6 +50,12 @@ import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
+import software.amazon.awssdk.services.s3.model.CopyObjectRequest;
+import software.amazon.awssdk.services.s3.model.CopyObjectResponse;
+import software.amazon.awssdk.services.s3.model.CopyObjectResult;
+import software.amazon.awssdk.services.s3.model.UploadPartCopyRequest;
+import software.amazon.awssdk.services.s3.model.UploadPartCopyResponse;
+import software.amazon.awssdk.services.s3.model.CopyPartResult;
 
 class S3ObjectTargetProviderTest {
 
@@ -57,7 +63,9 @@ class S3ObjectTargetProviderTest {
     void streamsMultipartUploadAndCompletesOnClose() {
         S3Client client = mock(S3Client.class);
         when(client.completeMultipartUpload(any(CompleteMultipartUploadRequest.class)))
-            .thenReturn(CompleteMultipartUploadResponse.builder().eTag("completed-etag").build());
+            .thenReturn(CompleteMultipartUploadResponse.builder().eTag("completed-etag").versionId("source-version").build());
+        when(client.copyObject(any(CopyObjectRequest.class))).thenReturn(CopyObjectResponse.builder()
+            .copyObjectResult(CopyObjectResult.builder().eTag("metadata-etag").build()).versionId("metadata-version").build());
         when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
             .thenReturn(CreateMultipartUploadResponse.builder().uploadId("upload-1").build());
         when(client.uploadPart(any(UploadPartRequest.class), any(RequestBody.class)))
@@ -88,8 +96,157 @@ class S3ObjectTargetProviderTest {
             S3ObjectSourceProvider.CHECKSUM_KIND_SHA256,
             result.reference().metadata().get(S3ObjectSourceProvider.CHECKSUM_KIND_METADATA));
         assertEquals(sha256(payload), result.reference().checksum());
-        assertEquals("completed-etag",
+        assertEquals("metadata-etag",
             result.reference().metadata().get(S3ObjectSourceProvider.ORIGINAL_ETAG_METADATA));
+        assertEquals("metadata-version", result.reference().version());
+        ArgumentCaptor<CopyObjectRequest> copy = ArgumentCaptor.forClass(CopyObjectRequest.class);
+        verify(client).copyObject(copy.capture());
+        assertEquals("source-version", copy.getValue().sourceVersionId());
+        assertEquals("completed-etag", copy.getValue().copySourceIfMatch());
+        assertEquals("1", copy.getValue().metadata().get("recordcount"));
+        assertEquals("1", S3ObjectTargetProvider.restoreFinalMetadata(copy.getValue().metadata()).get("recordCount"));
+    }
+
+    @Test
+    void emptyOutputPersistsCloseMetadataWithoutCopyingAnObject() {
+        S3Client client = mock(S3Client.class);
+        when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+            .thenReturn(CreateMultipartUploadResponse.builder().uploadId("empty-upload").build());
+        when(client.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
+            .thenReturn(PutObjectResponse.builder().eTag("empty-etag").versionId("empty-version").build());
+        try (var provider = new S3ObjectTargetProvider(client, Runnable::run, 5 * 1024 * 1024)) {
+            var result = provider.open(openRequest()).toCompletableFuture().join()
+                .close(new ObjectWriteCloseRequest(0, sha256(new byte[0]), Map.of("recordCount", "0")))
+                .toCompletableFuture().join();
+            var put = ArgumentCaptor.forClass(PutObjectRequest.class);
+            verify(client).putObject(put.capture(), any(RequestBody.class));
+            assertEquals("0", S3ObjectTargetProvider.restoreFinalMetadata(put.getValue().metadata()).get("recordCount"));
+            assertEquals("empty-version", result.reference().version());
+            verify(client, never()).copyObject(any(CopyObjectRequest.class));
+        }
+    }
+
+    @Test
+    void aFreshPagedReaderRestoresCaseSensitiveFinalMetadata() {
+        S3Client client = mock(S3Client.class);
+        var metadata = Map.of("tpf.page.index", "0", "tpf.page.group", "group", "tpf.page.finalkey", "final.csv",
+            "tpf.page.contenttype", "text/csv", "tpf.page.partkey", "page.part", "recordcount", "10",
+            S3ObjectTargetProvider.FINAL_METADATA_PREFIX + "7265636f7264436f756e74", "MTA=");
+        when(client.listObjectsV2(any(software.amazon.awssdk.services.s3.model.ListObjectsV2Request.class)))
+            .thenReturn(software.amazon.awssdk.services.s3.model.ListObjectsV2Response.builder().isTruncated(false)
+                .contents(software.amazon.awssdk.services.s3.model.S3Object.builder().key("out/page.part").build()).build());
+        when(client.headObject(any(HeadObjectRequest.class))).thenReturn(HeadObjectResponse.builder().metadata(metadata).build());
+        try (var reader = new S3ObjectTargetProvider(client, Runnable::run, 5 * 1024 * 1024)) {
+            var parts = reader.listParts(new org.pipelineframework.objectpublish.PagedObjectPartQuery(
+                "results", openRequest().target(), "stage/")).toCompletableFuture().join();
+            assertEquals(1, parts.size());
+            assertEquals("10", parts.getFirst().metadata().get("recordCount"));
+            assertTrue(parts.getFirst().metadata().keySet().stream().noneMatch(k -> k.startsWith(S3ObjectTargetProvider.FINAL_METADATA_PREFIX)));
+        }
+    }
+
+    @Test
+    void malformedFinalMetadataFailsInsteadOfReturningAnIncorrectCount() {
+        assertThrows(IllegalStateException.class, () -> S3ObjectTargetProvider.restoreFinalMetadata(
+            Map.of(S3ObjectTargetProvider.FINAL_METADATA_PREFIX + "invalid-hex", "MTA=")));
+        assertEquals(Map.of("legacy", "value"), S3ObjectTargetProvider.restoreFinalMetadata(Map.of("legacy", "value")));
+    }
+
+    @Test
+    void largeOutputUsesVersionPinnedMultipartCopyWithoutDownloadingPayload() {
+        S3Client client = mock(S3Client.class);
+        when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+            .thenReturn(CreateMultipartUploadResponse.builder().uploadId("metadata-upload").build());
+        when(client.uploadPartCopy(any(UploadPartCopyRequest.class))).thenReturn(UploadPartCopyResponse.builder()
+            .copyPartResult(CopyPartResult.builder().eTag("copied-part").build()).build());
+        when(client.completeMultipartUpload(any(CompleteMultipartUploadRequest.class)))
+            .thenReturn(CompleteMultipartUploadResponse.builder().eTag("large-final").versionId("large-version").build());
+        var result = S3ObjectTargetProvider.replaceMetadata(client, "bucket", "path/part", "source-version",
+            "source-etag", "text/csv", 6_000_000_000L, Map.of("recordcount", "10"));
+        var copied = ArgumentCaptor.forClass(UploadPartCopyRequest.class);
+        verify(client, org.mockito.Mockito.times(6)).uploadPartCopy(copied.capture());
+        assertEquals("bytes=0-1073741823", copied.getAllValues().getFirst().copySourceRange());
+        assertTrue(copied.getAllValues().getLast().copySourceRange().endsWith("-5999999999"));
+        assertTrue(copied.getAllValues().stream().allMatch(r -> "source-version".equals(r.sourceVersionId())
+            && "source-etag".equals(r.copySourceIfMatch())));
+        assertEquals("large-version", result.version());
+        verify(client, never()).getObject(any(GetObjectRequest.class));
+        verify(client, never()).getObject(any(GetObjectRequest.class),
+            any(software.amazon.awssdk.core.sync.ResponseTransformer.class));
+        verify(client, never()).getObjectAsBytes(any(GetObjectRequest.class));
+        verify(client, never()).copyObject(any(CopyObjectRequest.class));
+    }
+
+    @Test
+    void failedMetadataMultipartCopyIsAbortedAndDoesNotPublishSuccess() {
+        S3Client client = mock(S3Client.class);
+        when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+            .thenReturn(CreateMultipartUploadResponse.builder().uploadId("failed-copy").build());
+        when(client.uploadPartCopy(any(UploadPartCopyRequest.class))).thenThrow(new IllegalStateException("source changed"));
+        assertThrows(IllegalStateException.class, () -> S3ObjectTargetProvider.replaceMetadata(client,
+            "bucket", "part", "source-version", "source-etag", "text/csv", 6_000_000_000L, Map.of()));
+        verify(client).abortMultipartUpload(any(AbortMultipartUploadRequest.class));
+        verify(client, never()).completeMultipartUpload(any(CompleteMultipartUploadRequest.class));
+    }
+
+    @Test
+    void metadataFailureRetainsCompletedPayloadAndFailsTheWrite() {
+        S3Client client = mock(S3Client.class);
+        when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+            .thenReturn(CreateMultipartUploadResponse.builder().uploadId("data-upload").build());
+        when(client.uploadPart(any(UploadPartRequest.class), any(RequestBody.class)))
+            .thenReturn(UploadPartResponse.builder().eTag("data-part").build());
+        when(client.completeMultipartUpload(any(CompleteMultipartUploadRequest.class)))
+            .thenReturn(CompleteMultipartUploadResponse.builder().eTag("data-etag").versionId("retained-version").build());
+        when(client.copyObject(any(CopyObjectRequest.class))).thenThrow(new IllegalStateException("metadata unavailable"));
+        try (var provider = new S3ObjectTargetProvider(client, Runnable::run, 5 * 1024 * 1024)) {
+            var session = provider.open(openRequest()).toCompletableFuture().join();
+            session.write(ByteBuffer.wrap(new byte[] {1})).toCompletableFuture().join();
+            var failed = assertThrows(CompletionException.class, () -> session.close(
+                new ObjectWriteCloseRequest(1, sha256(new byte[] {1}), Map.of("recordCount", "1")))
+                .toCompletableFuture().join());
+            assertEquals("metadata unavailable", failed.getCause().getMessage());
+            session.abort(failed).toCompletableFuture().join();
+            verify(client, never()).deleteObject(any(software.amazon.awssdk.services.s3.model.DeleteObjectRequest.class));
+        }
+    }
+
+    @Test
+    void encodedCloseMetadataSizeIsValidatedBeforeCompletingPayload() {
+        S3Client client = mock(S3Client.class);
+        when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+            .thenReturn(CreateMultipartUploadResponse.builder().uploadId("oversized-metadata").build());
+        RuntimeException abortFailure = new RuntimeException("abort unavailable");
+        doThrow(abortFailure).when(client).abortMultipartUpload(any(AbortMultipartUploadRequest.class));
+        try (var provider = new S3ObjectTargetProvider(client, Runnable::run, 5 * 1024 * 1024)) {
+            var session = provider.open(openRequest()).toCompletableFuture().join();
+            session.write(ByteBuffer.wrap(new byte[] {1})).toCompletableFuture().join();
+            var failure = assertThrows(CompletionException.class, () -> session.close(
+                new ObjectWriteCloseRequest(1, sha256(new byte[] {1}), Map.of("label", "é".repeat(600))))
+                .toCompletableFuture().join());
+            assertEquals("S3 stored user metadata exceeds 2048 UTF-8 bytes", failure.getCause().getMessage());
+            assertSame(abortFailure, failure.getCause().getSuppressed()[0]);
+            verify(client, never()).uploadPart(any(UploadPartRequest.class), any(RequestBody.class));
+            verify(client, never()).completeMultipartUpload(any(CompleteMultipartUploadRequest.class));
+        }
+    }
+
+    @Test
+    void nonAsciiCloseMetadataWithinStoredSizeLimitRemainsSupported() {
+        S3Client client = mock(S3Client.class);
+        when(client.createMultipartUpload(any(CreateMultipartUploadRequest.class)))
+            .thenReturn(CreateMultipartUploadResponse.builder().uploadId("unicode-metadata").build());
+        when(client.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
+            .thenReturn(PutObjectResponse.builder().eTag("empty-etag").build());
+        try (var provider = new S3ObjectTargetProvider(client, Runnable::run, 5 * 1024 * 1024)) {
+            provider.open(openRequest()).toCompletableFuture().join()
+                .close(new ObjectWriteCloseRequest(0, sha256(new byte[0]), Map.of("finalLabel", "é".repeat(400))))
+                .toCompletableFuture().join();
+            var put = ArgumentCaptor.forClass(PutObjectRequest.class);
+            verify(client).putObject(put.capture(), any(RequestBody.class));
+            assertEquals("é".repeat(400),
+                S3ObjectTargetProvider.restoreFinalMetadata(put.getValue().metadata()).get("finalLabel"));
+        }
     }
 
     @Test

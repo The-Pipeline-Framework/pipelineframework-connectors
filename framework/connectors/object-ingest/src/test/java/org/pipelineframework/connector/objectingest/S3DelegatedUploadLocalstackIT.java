@@ -38,6 +38,47 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
 @EnabledIfEnvironmentVariable(named = "TPF_LOCALSTACK_ENDPOINT", matches = ".+")
 class S3DelegatedUploadLocalstackIT {
     @Test
+    void streamingCloseMetadataSurvivesS3HeadersAndFreshPagedReader() throws Exception {
+        String bucket = "tpf-close-meta-" + UUID.randomUUID();
+        byte[] data = "payment,10\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        try (S3Client client = S3Client.builder().endpointOverride(URI.create(System.getenv("TPF_LOCALSTACK_ENDPOINT")))
+            .region(Region.US_EAST_1).serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build())
+            .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build()) {
+            client.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+            client.putBucketVersioning(software.amazon.awssdk.services.s3.model.PutBucketVersioningRequest.builder()
+                .bucket(bucket).versioningConfiguration(software.amazon.awssdk.services.s3.model.VersioningConfiguration.builder()
+                    .status(software.amazon.awssdk.services.s3.model.BucketVersioningStatus.ENABLED).build()).build());
+            var target = new PipelineObjectPublishConfig("results", "object", "s3",
+                Map.of("bucket", bucket, "prefix", "out"), null, null);
+            var metadata = Map.of("tpf.page.index", "0", "tpf.page.group", "csv", "tpf.page.finalKey", "csv.out",
+                "tpf.page.contentType", "text/csv", "tpf.page.partKey", "page.part");
+            org.pipelineframework.objectpublish.ObjectWriteResult result;
+            try (var writer = new S3ObjectTargetProvider(client)) {
+                var session = writer.open(new org.pipelineframework.objectpublish.ObjectWriteOpenRequest(
+                    "results", target, "page.part", "text/csv", metadata, "retained-page")).toCompletableFuture().join();
+                session.write(java.nio.ByteBuffer.wrap(data)).toCompletableFuture().join();
+                result = session.close(new org.pipelineframework.objectpublish.ObjectWriteCloseRequest(
+                    data.length, HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(data)),
+                    Map.of("recordCount", "10"))).toCompletableFuture().join();
+            }
+            var stored = client.headObject(HeadObjectRequest.builder().bucket(bucket).key("out/page.part").build());
+            assertEquals("10", stored.metadata().get("recordcount"));
+            assertEquals(result.reference().version(), stored.versionId());
+            assertArrayEquals(data, client.getObjectAsBytes(software.amazon.awssdk.services.s3.model.GetObjectRequest.builder()
+                .bucket(bucket).key("out/page.part").versionId(stored.versionId()).build()).asByteArray());
+            var versions = client.listObjectVersions(software.amazon.awssdk.services.s3.model.ListObjectVersionsRequest.builder()
+                .bucket(bucket).prefix("out/page.part").build()).versions();
+            assertEquals(2, versions.size(), "Original completed bytes remain a retained version");
+            try (var reader = new S3ObjectTargetProvider(client)) {
+                var parts = reader.listParts(new org.pipelineframework.objectpublish.PagedObjectPartQuery(
+                    "results", target, "page")).toCompletableFuture().join();
+                assertEquals(1, parts.size());
+                assertEquals("10", parts.getFirst().metadata().get("recordCount"));
+            }
+        }
+    }
+
+    @Test
     void presignedPartsCompleteIntoVerifiedOwnedReferenceAndDownload() throws Exception {
         String endpoint = System.getenv("TPF_LOCALSTACK_ENDPOINT");
         String previousKey = System.getProperty("tpf.object.reference.hmac-key");
