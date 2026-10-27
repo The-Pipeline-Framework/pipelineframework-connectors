@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.model.chat.request.ToolChoice;
 import dev.langchain4j.data.message.ImageContent;
 import dev.langchain4j.data.message.PdfFileContent;
 import dev.langchain4j.data.message.TextContent;
@@ -121,6 +122,7 @@ class LangChain4jOllamaQueryConnectorTest {
                 calls.incrementAndGet();
                 assertEquals(List.of("charge"),
                     request.toolSpecifications().stream().map(specification -> specification.name()).toList());
+                assertEquals(ToolChoice.REQUIRED, request.toolChoice());
                 return ChatResponse.builder()
                     .aiMessage(AiMessage.from(ToolExecutionRequest.builder()
                         .name("charge")
@@ -289,6 +291,31 @@ class LangChain4jOllamaQueryConnectorTest {
 
         assertEquals("", proposal.alias());
         assertEquals("{}", proposal.argumentsJson());
+    }
+
+    @Test
+    void acceptsPlainTextOnlyForATypedTextCompletion() throws Exception {
+        var client = new LangChain4jOllamaQueryConnector.LangChain4jDecisionClient(
+            async(model(AiMessage.from("Let's start again."))));
+        var request = new LlmTurnRequest("Decide once.", "{}", List.of(
+            new LlmToolDefinition("owner_action", "Handoff", """
+                {"type":"object","properties":{"intent":{"type":"string"}},"required":["intent"],"additionalProperties":false}
+                """),
+            new LlmToolDefinition("complete", "Reply", """
+                {"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}
+                """)), org.pipelineframework.connector.llm.StructuredOutputSchemaMode.OPTIONAL);
+
+        var proposal = client.decide(request).toCompletableFuture().join().proposal();
+
+        assertEquals("complete", proposal.alias());
+        assertEquals("Let's start again.", new ObjectMapper().readTree(proposal.argumentsJson()).path("text").asText());
+    }
+
+    @Test
+    void rejectsPlainTextWhenCompletionHasNoTypedTextField() {
+        var proposal = decide(AiMessage.from("Let's start again."));
+
+        assertEquals("", proposal.alias());
     }
 
     @Test
