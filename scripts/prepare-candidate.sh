@@ -9,8 +9,6 @@ base_version=$(python3 - "$repo_root/pom.xml" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 version = ET.parse(sys.argv[1]).getroot().findtext("{http://maven.apache.org/POM/4.0.0}version", "")
-if not version.endswith("-SNAPSHOT"):
-    raise SystemExit("root project version must end in -SNAPSHOT")
 print(version.removesuffix("-SNAPSHOT"))
 PY
 )
