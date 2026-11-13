@@ -42,10 +42,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
       - name: Verify effective publication flags
         run: |
-          ./mvnw -Pcentral-publishing -q -DskipTests help:effective-pom -Doutput=target/connectors-effective-pom.xml -Dmaven.repo.local="$GITHUB_WORKSPACE/.m2/repository"
+          ./mvnw -Pcentral-publishing -Dtpf.central.publishing.extension=false -q -DskipTests help:effective-pom -Doutput=target/connectors-effective-pom.xml -Dmaven.repo.local="$GITHUB_WORKSPACE/.m2/repository"
           node scripts/verify-connector-publication.mjs target/connectors-effective-pom.xml
       - name: Verify and publish
-        run: ./mvnw -Pcentral-publishing -B clean deploy -U --no-transfer-progress -Dgpg.skip=false -Dmaven.repo.local="$GITHUB_WORKSPACE/.m2/repository"
+        run: ./mvnw -Pcentral-publishing -B clean deploy -U --no-transfer-progress -Dgpg.skip=false -Dtpf.central.publishing.extension=false -DaltSnapshotDeploymentRepository=central::https://central.sonatype.com/repository/maven-snapshots/ -Daether.connector.http.retryHandler.count.central=5 -Daether.connector.http.retryHandler.interval.central=30000 -Dmaven.repo.local="$GITHUB_WORKSPACE/.m2/repository"
         env:
           CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
